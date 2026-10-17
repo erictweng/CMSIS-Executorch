@@ -9,7 +9,6 @@ extern "C" {
 #include CMSIS_device_header
 #include "RTE_Device.h"
 #include "Driver_CDC200.h"
-#include "se_services_port.h"
 extern ARM_DRIVER_CDC200 Driver_CDC200;
 }
 
@@ -20,8 +19,8 @@ static_assert(RTE_PANEL_HACTIVE_TIME == kWidth && RTE_PANEL_VACTIVE_LINE == kHei
               "This layout requires the DK-E8 480x800 panel");
 static_assert(RTE_CDC200_PIXEL_FORMAT == 2, "The framebuffer uses RGB565");
 
-// RGB565 scanout uses 768000 bytes. The GNU linker puts it in SRAM1,
-// separate from the AI pools and camera ring in SRAM0.
+// RGB565 scanout, 768000 bytes, in SRAM0 above the A32 stub with the AI pools and
+// the camera ring (the linker scripts route .bss.lcd_frame_buf there).
 alignas(32) uint16_t framebuffer[kWidth * kHeight]
     __attribute__((section(".bss.lcd_frame_buf")));
 volatile uint32_t display_errors;
@@ -122,25 +121,10 @@ bool driver_ok(const char* stage, int32_t result) {
 }
 
 bool enable_display_power() {
-  uint32_t service_error = 0;
-  run_profile_t profile = {};
-  uint32_t status = SERVICES_get_run_cfg(se_services_s_handle, &profile, &service_error);
-  if (status || service_error) {
-    std::printf("LCD get power profile failed: %lu / %lu\n",
-                static_cast<unsigned long>(status), static_cast<unsigned long>(service_error));
-    return false;
-  }
-  // Preserve the NPU/CPU memory and clocks already enabled by board startup.
-  profile.memory_blocks |= MRAM_MASK | SRAM0_MASK | SRAM1_MASK;
-  profile.phy_pwr_gating |= MIPI_PLL_DPHY_MASK | MIPI_TX_DPHY_MASK |
-                            MIPI_RX_DPHY_MASK | LDO_PHY_MASK;
-  status = SERVICES_set_run_cfg(se_services_s_handle, &profile, &service_error);
-  if (status || service_error) {
-    std::printf("LCD set power profile failed: %lu / %lu\n",
-                static_cast<unsigned long>(status), static_cast<unsigned long>(service_error));
-    return false;
-  }
-  // MIPI-only portion of Alif's DevKit-E8 vbat_init() example.
+  // The D-PHYs are already powered by main.c (vbat_init) and by the camera; this
+  // repeats it in case the display comes up first. Do not call SERVICES_set_run_cfg
+  // with memory blocks here: on this board it once left MRAM/SRAM0 unusable until a
+  // SETOOLS recovery (see board/DevKit-E8/README.md on hackathon-pico-faces).
   VBAT->PWR_CTRL &= ~((1u << 0) | (1u << 4) | (1u << 8) | (1u << 12));
   VBAT->PWR_CTRL &= ~((1u << 1) | (1u << 5) | (1u << 9));
   return true;

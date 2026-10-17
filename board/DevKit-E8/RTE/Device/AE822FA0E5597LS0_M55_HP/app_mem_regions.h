@@ -52,7 +52,7 @@
 // =======================
 //   <q>Combine SRAM0 & SRAM1
 //   <i> Combines SRAM0 and SRAM1 into single memory region
-#define SRAM0_SRAM1_COMBINED        1
+#define SRAM0_SRAM1_COMBINED        0   // SRAM1 follows SRAM0, but the Ethos-U85 cannot reach it: keep NPU buffers in SRAM0
 // <h> SRAM
 //   <o> Base address <0x02000000-0x027FFFFF:8>
 //   <i> Defines base address of SRAM memory region.
@@ -65,6 +65,10 @@
 //   <q>No zero initialize
 //   <i> Excludes SRAM0 region from zero initialization.
 #define APP_SRAM_NOINIT        1
+//   <o> Offset of the application pools <0x0-0x00400000:8>
+//   <i> The ATOC loads the A32 boot stub (A32_STUB in .alif/M55_HP_mram_cfg.json) to
+//   <i> 0x02000000; the camera ring, the ExecuTorch pools and the LCD frame buffer start above it.
+#define APP_SRAM_POOL_OFFSET   0x00010000
 // </h>
 
 // <h> SRAM0
