@@ -9,6 +9,7 @@ Environment overrides:
                  (default: the first ~/.vcpkg/artifacts/* that has cmsis-toolbox 2.15.0)
   FS_UART        serial port of the DevKit-E8 PRG USB (default: the first /dev/cu.usbmodem*)
   FS_HW=1        run the tests that flash and run the board
+  FS_BOOT_TIMEOUT seconds to wait for UART output after a reset (default 90)
 """
 
 from __future__ import annotations
@@ -36,6 +37,9 @@ BOARD = REPO / "board" / TARGET
 LAYER = BOARD / "Board-U85.clayer.yml"
 RTE_DEVICE = BOARD / "RTE" / "Device" / "AE822FA0E5597LS0_M55_HP" / "RTE_Device.h"
 JLINK_DEVICE = "AE822FA0E5597LS0_M55_HP"
+# Seconds to wait for the app's UART output after a reset. A boot normally prints within a
+# second, but when the Secure Enclave answers slowly main()'s SE calls take ~25 s.
+BOOT_TIMEOUT = float(os.environ.get("FS_BOOT_TIMEOUT", "90"))
 
 
 def tools_root() -> Path:
@@ -110,8 +114,29 @@ def jlink(commands: list[str], timeout: float = 120) -> str:
         os.unlink(script)
 
 
+# Do not touch the CPI registers (0x49030000) from the debugger: with the CPI clock
+# off, a J-Link access there locked up the M55_HP debug port until a power cycle.
+# The firmware stops the camera itself (fs_camera_stop) before main() returns.
+
+
 def flash_and_start(hex_path: Path = HEX) -> str:
     return jlink(["h", f'loadfile "{hex_path}"', "r", "g"], timeout=300)
+
+
+def reset_and_start() -> str:
+    return jlink(["h", "r", "g"])
+
+
+def se_stuck() -> bool:
+    """True when the core sits in the SE services request loop (the Secure Enclave stopped
+    answering; only a power cycle of the board clears it)."""
+    out = jlink(["h", "g"])
+    pc = int(re.search(r"^PC = ([0-9A-F]+)", out, re.M).group(1), 16)
+    try:
+        lo = symbol_address("SERVICES_send_request")
+    except KeyError:
+        return False
+    return lo <= pc < lo + 0x100
 
 
 def read_word(addr: int) -> int:
