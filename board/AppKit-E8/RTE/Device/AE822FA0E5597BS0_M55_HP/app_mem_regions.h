@@ -65,6 +65,10 @@
 //   <q>No zero initialize
 //   <i> Excludes SRAM0 region from zero initialization.
 #define APP_SRAM_NOINIT        1
+//   <o> Offset of the application pools <0x0-0x00400000:8>
+//   <i> The shared ../DevKit-E8 linker scripts start the bulk-SRAM regions here;
+//   <i> 0 keeps this layer's layout (the DevKit uses 64 kB for its A32 boot stub).
+#define APP_SRAM_POOL_OFFSET   0x00000000
 // </h>
 
 // <h> SRAM0

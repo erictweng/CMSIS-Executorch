@@ -22,40 +22,32 @@ csolution debugs it through the on-board J-Link (`J-Link Server`, SWD at
 
 ## LCD output
 
-The DevKit-E8 layer enables `FINGERSPELL_LCD` and the ILI9806E/CDC200/MIPI DSI
-drivers. `src/fs_display.cpp` implements `fs_ui_init()` and `fs_ui_render()`
-from `src/fs_api.h`. The LCD uses 480x800 RGB565 (`RTE_CDC200_PIXEL_FORMAT 2`).
+The layer defines `FINGERSPELL_LCD` and adds the CDC200, MIPI DSI and ILI9806E
+components (480x800 portrait panel on J21, two DSI lanes, RGB565 via
+`RTE_CDC200_PIXEL_FORMAT 2`). `src/fs_display.cpp` implements `fs_ui_init()` and
+`fs_ui_render()` from `src/fs_api.h`:
 
-At boot it shows the saved test crop, predicted letter, confidence and
-PASS/FAIL. After camera startup, `live_loop()` supplies its existing 128x128
-RGB888 crop, the upstream decoder state and stage timings to the display.
-The live screen shows the crop, current letter/confidence, the last 52 text
-characters, NPU time and loop FPS. Camera capture and inference still run
-continuously; the decoder's existing three-frame commit rule is used.
+- top: `FINGERSPELL`; the 128x128 crop the model sees, scaled 3x (384x384) in a
+  1 px frame (the sensor's orientation already gives a mirror image; `kMirrorX` and
+  `kFlipY` in `fs_display.cpp` flip the preview only, never the model input);
+- the model's top letter in big type with its probability as a percentage and a
+  bar, green once the decoder holds it above its commit threshold, grey below;
+- the 2nd/3rd guesses, then `CAM .. NPU .. UI .. MS  .. FPS`;
+- bottom: the text the decoder has committed.
 
-The LCD module borrows the crop through `fs_display_set_frame()`; keep that
-buffer valid until `fs_ui_render()` returns. It uses the shared decoder types,
-without another decoder implementation. If LCD startup fails, the existing
-top-3 UART stream continues and `fs_ui_render()` prints the text/state fallback.
+At boot the same screen shows the baked-in test crop and PASS/FAIL until the
+camera starts. `live_loop()` hands the crop (`fs_display_set_frame`), the top-3
+(`fs_display_set_top3`), the decoder and the timings to the display every frame
+and prints the render time as `ui x.xms` in the live UART line. The static parts
+are drawn once; per frame only the crop is rewritten (whole rows) and a text
+field when its string changes, and only the touched rows are cleaned out of the
+data cache for the CDC200: about 1.8 ms per frame, the loop stays at ~19 fps.
 
-The GNU script puts the 768000-byte framebuffer in SRAM1 and includes it in
-the startup zero table. SRAM0 keeps the 3 MiB AI pools and 618496-byte camera
-ring/canary. Together those buffers would exceed SRAM0's 4 MiB capacity.
-The AC6 script uses the combined 8 MiB region, or SRAM1 for LCD scanout when
-the regions are configured separately. Display power setup preserves the
-current SE profile and requests both SRAM banks and the MIPI power domains.
-
-This integration needs a board check with both the MT9M114 and LCD attached:
-confirm the boot image/PASS screen, live crop/letters/text, camera error counters,
-render time (the UI contract targets under 10 ms) and reset while streaming.
-Builds and host tests do not verify camera/LCD operation together.
-
-Local validation: GCC 14.3.1 builds passed for DevKit-E8 and the headless
-SSE-320-U85 target. The decoder host suite and five camera source checks
-passed; hardware tests were skipped. The DevKit-E8 ELF places the LCD buffer
-at `0x02400000` in SRAM1, with no overlap with the AI/camera buffers and a
-matching startup zero-table entry. AC6 validation was blocked before source
-compilation because this Mac has no Arm Compiler license configured.
+If the panel does not start, the live UART line continues and `fs_ui_render()`
+prints the contract's `TEXT|live|conf|fps|npu_ms` fallback line per frame.
+Display power is the VBAT D-PHY bits only (`main.c`'s `vbat_init()`); the layer
+never calls `SERVICES_set_run_cfg` with memory blocks, which once left MRAM/SRAM0
+unusable until a SETOOLS recovery.
 
 ## Memory layout
 
@@ -63,7 +55,8 @@ compilation because this Mac has no Arm Compiler license configured.
 |--------|---------|----------|
 | MRAM (HP application region) | `0x80200000`, 2 MB | Constants, the embedded `.pte` model; with AC6 also the code, which executes in place. With GCC and Clang the startup code executes from MRAM and copies the rest of the code to ITCM (`linker_gnu_mram.ld.src`) |
 | DTCM (SRAM3) | `0x20000000` (core alias; `0x50800000` global), 1 MB | `.data`/`.bss`, 96 kB heap, 32 kB stack |
-| SRAM0/SRAM1 (bulk) | `0x02000000`, 8 MB combined (`SRAM0_SRAM1_COMBINED` in `app_mem_regions.h`; the GNU script uses SRAM0 alone, 4 MB) | `.bss.ai_pool`: the runner's 1 MB method pool and 2 MB temp pool (NPU scratch) |
+| SRAM0 (bulk) | `0x02010000`, 4 MB less the 64 kB A32 boot stub the ATOC loads at `0x02000000` (`APP_SRAM_POOL_OFFSET`, `SRAM0_SRAM1_COMBINED 0` in `app_mem_regions.h`) | `.bss.ai_pool`: the camera ring (0.6 MB), the runner's 1 MB method pool and 1 MB temp pool (NPU scratch); `.bss.lcd_frame_buf`: the 0.75 MB RGB565 frame buffer. 3.3 MB in all |
+| SRAM1 | `0x02400000`, 4 MB | Empty: the Ethos-U85 cannot reach it |
 
 The pool sizes and section come from the `define:` node of the layer
 (`APP_METHOD_POOL_SIZE`, `APP_TEMP_POOL_SIZE`, `APP_POOL_SECTION`) and are

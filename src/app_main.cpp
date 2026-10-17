@@ -34,6 +34,8 @@
 #ifdef RTE_VSTREAM_VIDEOIN  // board layer with the MT9M114 camera (DevKit-E8)
 #include CMSIS_device_header
 #include "fs_camera.h"
+#include "sys_clocks.h"  // SystemREFClock
+#include "sys_utils.h"   // sys_busy_loop_init_ns
 #define FS_HAVE_CAMERA 1
 #endif
 
@@ -137,14 +139,14 @@ bool classify(EmbeddedModule& module, TopK* r) {
 #ifdef FS_HAVE_CAMERA
 alignas(16) uint8_t g_crop[kSize * kSize * 3];
 
-// ---- timing: the M55 cycle counter -----------------------------------------------
-void cycles_init() {
-  DCB->DEMCR |= DCB_DEMCR_TRCENA_Msk;
-  DWT->CYCCNT = 0;
-  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-}
-inline uint32_t cycles() { return DWT->CYCCNT; }
-inline float cycles_ms(uint32_t c) { return c * 1000.0f / SystemCoreClock; }
+// ---- timing: the SoC's 100 MHz REFCLK counter ----------------------------------------
+// Not the M55's DWT cycle counter: it only runs while a debugger asserts NIDEN, so a board
+// that booted on its own printed 0.0 ms everywhere. The REFCLK counter is free-running
+// (the pack's sys_busy_loop_init_ns enables it) and wraps every 43 s; differences are fine.
+void cycles_init() { sys_busy_loop_init_ns(); }
+inline uint32_t cycles() { return REFCLK_CNTRead->CNTCVL; }
+inline uint32_t cycles_per_ms() { return SystemREFClock / 1000; }
+inline float cycles_ms(uint32_t c) { return c * 1000.0f / SystemREFClock; }
 
 // ---- step 4: frames ----------------------------------------------------------------
 // 8 fixed sample points (x, y) across the 320x320 frame: centre, ring, corners.
@@ -166,9 +168,9 @@ unsigned frame_mean_luma(const uint16_t* f) {
 // Grab frames for `ms` milliseconds; every ~250 ms print the frame number, 8 raw
 // pixels and the mean brightness. Cover the lens and the numbers drop.
 void camera_probe(uint32_t ms) {
-  const uint32_t start = cycles(), period = SystemCoreClock / 4;
+  const uint32_t start = cycles(), period = 250 * cycles_per_ms();
   uint32_t next = start, first_seq = 0, last_seq = 0;
-  while (cycles() - start < ms * (SystemCoreClock / 1000)) {
+  while (cycles() - start < ms * cycles_per_ms()) {
     uint32_t seq = 0;
     const uint16_t* f = fs_camera_latest_frame(500, &seq);
     if (f == nullptr) {
@@ -246,7 +248,8 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
 // ---- step 5: the live loop -----------------------------------------------------------
 // Never returns. Per frame: camera crop (waits for a new frame), preprocess, model, and one line
 //   L 0.93 B 0.04 A 0.01 | cam 12.0ms pre 3.1ms npu 2.3ms | 18.4 fps
-// fps is the loop rate, smoothed over the last frames.
+// fps is the loop rate, smoothed over the last frames. With the LCD (FINGERSPELL_LCD) the
+// frame is also drawn on the panel and "ui x.xms" (decoder + render) precedes the fps.
 [[noreturn]] void live_loop(EmbeddedModule& module) {
   printf("live: camera -> model -> top-3 (cam = wait for frame + crop, pre = to float, "
          "npu = forward + softmax)\n");
@@ -274,7 +277,7 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     if (!classify(module, &r)) continue;
     const uint32_t t3 = cycles();
 #ifdef FINGERSPELL_LCD
-    // The free-running 32 kHz timer keeps milliseconds monotonic across DWT wraps.
+    // The free-running 32 kHz timer keeps milliseconds monotonic across REFCLK wraps.
     const uint32_t now_ms = static_cast<uint32_t>(
         static_cast<uint64_t>(S32K_CNTRead->CNTCVL) * 1000u / 32768u);
     const fs_event_t event = fs_decoder_step(&decoder, r.probabilities, now_ms);
@@ -287,14 +290,23 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     }
     last = t0;
     g_fs_loop_frames++;
-    printf("%c %.2f %c %.2f %c %.2f | cam %.1fms pre %.1fms npu %.1fms | %.1f fps\n", kLabels[r.top[0]],
-           r.prob[0], kLabels[r.top[1]], r.prob[1], kLabels[r.top[2]], r.prob[2], cycles_ms(t1 - t0),
-           cycles_ms(t2 - t1), cycles_ms(t3 - t2), period_ms > 0.f ? 1000.f / period_ms : 0.f);
 #ifdef FINGERSPELL_LCD
+    // The LCD: crop, top-3 and the decoder's text. Its time is printed as "ui" below.
     const fs_metrics_t metrics = {period_ms > 0.f ? 1000.f / period_ms : 0.f,
                                  cycles_ms(t1 - t0), cycles_ms(t2 - t1), cycles_ms(t3 - t2),
                                  cycles_ms(t4 - t3), cycles_ms(t4 - t0)};
+    const char top3[3] = {kLabels[r.top[0]], kLabels[r.top[1]], kLabels[r.top[2]]};
+    fs_display_set_top3(top3, r.prob);
     fs_ui_render(&decoder, &metrics, event);
+    const float ui_ms = cycles_ms(cycles() - t4);
+    printf("%c %.2f %c %.2f %c %.2f | cam %.1fms pre %.1fms npu %.1fms ui %.1fms | %.1f fps\n",
+           kLabels[r.top[0]], r.prob[0], kLabels[r.top[1]], r.prob[1], kLabels[r.top[2]], r.prob[2],
+           cycles_ms(t1 - t0), cycles_ms(t2 - t1), cycles_ms(t3 - t2), ui_ms,
+           period_ms > 0.f ? 1000.f / period_ms : 0.f);
+#else
+    printf("%c %.2f %c %.2f %c %.2f | cam %.1fms pre %.1fms npu %.1fms | %.1f fps\n", kLabels[r.top[0]],
+           r.prob[0], kLabels[r.top[1]], r.prob[1], kLabels[r.top[2]], r.prob[2], cycles_ms(t1 - t0),
+           cycles_ms(t2 - t1), cycles_ms(t3 - t2), period_ms > 0.f ? 1000.f / period_ms : 0.f);
 #endif
     if (g_fs_dump_request) {
       dump_crop(g_crop, seq);

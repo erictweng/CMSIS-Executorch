@@ -1,14 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
+// Fingerspell on the DevKit-E8 LCD (ILI9806E, 480x800 portrait, RGB565 via the CDC200).
+//
+// The UI half of fs_api.h: fs_ui_init() brings the panel up, fs_ui_render() draws one frame.
+// Layout, top to bottom: title, the 128x128 camera crop the model sees scaled 3x (384x384)
+// in a 1 px frame, the live letter in big type with its confidence as a percentage and a
+// bar (green from the decoder's commit threshold up, grey below), the 2nd/3rd guesses, the
+// stage timings and fps, and the text the decoder has committed.
+//
+// Budget (fs_api.h): fs_ui_render() must return in < 10 ms. The static parts are drawn once;
+// per frame only the crop is rewritten (as whole rows, no per-pixel calls) and a text field
+// only when its string changes. The CDC200 reads the frame buffer straight from SRAM0, so
+// only the rows touched this frame are cleaned out of the data cache.
 #include "fs_display.h"
 
 #if defined(FINGERSPELL_LCD)
 #include <cstdio>
+#include <cstring>
 
 extern "C" {
 #include "RTE_Components.h"
 #include CMSIS_device_header
 #include "RTE_Device.h"
 #include "Driver_CDC200.h"
+#include "sys_clocks.h"  // SystemREFClock
 extern ARM_DRIVER_CDC200 Driver_CDC200;
 }
 
@@ -19,13 +33,22 @@ static_assert(RTE_PANEL_HACTIVE_TIME == kWidth && RTE_PANEL_VACTIVE_LINE == kHei
               "This layout requires the DK-E8 480x800 panel");
 static_assert(RTE_CDC200_PIXEL_FORMAT == 2, "The framebuffer uses RGB565");
 
+// The preview only; the model input is never flipped. kMirrorX swaps left and right
+// (a mirror across the vertical axis), kFlipY top and bottom. Checked on the board with a
+// hand: the sensor's own orientation already gives a mirror image, so neither is applied.
+constexpr bool kMirrorX = false;
+constexpr bool kFlipY = false;
+
 // RGB565 scanout, 768000 bytes, in SRAM0 above the A32 stub with the AI pools and
 // the camera ring (the linker scripts route .bss.lcd_frame_buf there).
 alignas(32) uint16_t framebuffer[kWidth * kHeight]
     __attribute__((section(".bss.lcd_frame_buf")));
 volatile uint32_t display_errors;
 bool display_started;
+bool fallback_announced;
 const uint8_t* preview;
+char top3_letters[3];
+float top3_probs[3];
 
 constexpr uint16_t rgb565(unsigned r, unsigned g, unsigned b) {
   return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
@@ -34,10 +57,25 @@ constexpr uint16_t kBackground = rgb565(12, 20, 34);
 constexpr uint16_t kCard = rgb565(24, 37, 56);
 constexpr uint16_t kWhite = rgb565(240, 247, 255);
 constexpr uint16_t kMuted = rgb565(151, 175, 199);
+constexpr uint16_t kGrey = rgb565(80, 95, 115);
 constexpr uint16_t kGreen = rgb565(76, 230, 168);
 constexpr uint16_t kRed = rgb565(255, 113, 113);
 
-// Five columns per glyph, with seven rows encoded in the low bits.
+// ---- layout (pixels) ---------------------------------------------------------------
+constexpr int kTitleY = 8;
+constexpr int kCropScale = 3;
+constexpr int kCropSize = FS_SIZE * kCropScale;             // 384
+constexpr int kCropX = (kWidth - kCropSize) / 2;            // 48
+constexpr int kCropY = 44;
+constexpr int kLetterX = 48, kLetterY = 448, kLetterScale = 12;  // 60 x 84 px
+constexpr int kPercentX = 132, kPercentY = 452, kPercentScale = 5;
+constexpr int kBarX = 132, kBarY = 497, kBarW = 300, kBarH = 24;
+constexpr int kGuessY = 548, kGuessScale = 3;
+constexpr int kMetricsY = 580, kMetricsScale = 3;
+constexpr int kWordsY = 616, kWordsH = 176, kWordsScale = 5;    // 4 rows of 14 chars
+constexpr int kWordsCols = 14, kWordsRows = 4, kWordsRowH = 42;
+
+// Five columns per glyph, with seven rows encoded in the low bits (bit 0 = top row).
 constexpr uint8_t kLetters[26][5] = {
     {0x7e,0x11,0x11,0x11,0x7e}, {0x7f,0x49,0x49,0x49,0x36},
     {0x3e,0x41,0x41,0x41,0x22}, {0x7f,0x41,0x41,0x22,0x1c},
@@ -59,55 +97,167 @@ constexpr uint8_t kDigits[10][5] = {
     {0x3c,0x4a,0x49,0x49,0x30}, {0x01,0x71,0x09,0x05,0x03},
     {0x36,0x49,0x49,0x49,0x36}, {0x06,0x49,0x49,0x29,0x1e}};
 constexpr uint8_t kPercent[5] = {0x63,0x13,0x08,0x64,0x63};
+constexpr uint8_t kDot[5] = {0x00,0x60,0x60,0x00,0x00};
+constexpr uint8_t kColon[5] = {0x00,0x36,0x36,0x00,0x00};
+constexpr uint8_t kDash[5] = {0x08,0x08,0x08,0x08,0x08};
+constexpr uint8_t kQuestion[5] = {0x02,0x01,0x51,0x09,0x06};
+
+const uint8_t* glyph(char c) {
+  if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+  if (c >= 'A' && c <= 'Z') return kLetters[c - 'A'];
+  if (c >= '0' && c <= '9') return kDigits[c - '0'];
+  switch (c) {
+    case '%': return kPercent;
+    case '.': return kDot;
+    case ':': return kColon;
+    case '-': return kDash;
+    case '?': return kQuestion;
+    default: return nullptr;  // space and anything unknown: advance only
+  }
+}
+
+// Rows written since the last cache clean (inclusive), or dirty_lo > dirty_hi for none.
+int dirty_lo = kHeight, dirty_hi = -1;
+void mark_rows(int y0, int y1) {
+  if (y0 < dirty_lo) dirty_lo = y0;
+  if (y1 > dirty_hi) dirty_hi = y1;
+}
 
 void rect(int x, int y, int w, int h, uint16_t color) {
-  for (int row = y; row < y + h && row < kHeight; ++row)
-    for (int col = x; col < x + w && col < kWidth; ++col)
-      if (row >= 0 && col >= 0) framebuffer[row * kWidth + col] = color;
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > kWidth) w = kWidth - x;
+  if (y + h > kHeight) h = kHeight - y;
+  if (w <= 0 || h <= 0) return;
+  for (int row = y; row < y + h; ++row) {
+    uint16_t* p = framebuffer + row * kWidth + x;
+    for (int col = 0; col < w; ++col) p[col] = color;
+  }
+  mark_rows(y, y + h - 1);
 }
 
+// 5x7 glyphs scaled by `scale`, one scaled column of spacing between characters.
 void text(int x, int y, const char* value, int scale, uint16_t color) {
   for (; *value; ++value, x += 6 * scale) {
-    const uint8_t* glyph = nullptr;
-    if (*value >= 'A' && *value <= 'Z') glyph = kLetters[*value - 'A'];
-    if (*value >= '0' && *value <= '9') glyph = kDigits[*value - '0'];
-    if (*value == '%') glyph = kPercent;
-    if (!glyph) continue;
+    const uint8_t* g = glyph(*value);
+    if (!g) continue;
     for (int col = 0; col < 5; ++col)
       for (int row = 0; row < 7; ++row)
-        if (glyph[col] & (1u << row))
-          rect(x + col * scale, y + row * scale, scale, scale, color);
+        if (g[col] & (1u << row)) rect(x + col * scale, y + row * scale, scale, scale, color);
   }
 }
 
-void render(const uint8_t* rgb, char predicted, float confidence, char expected, bool pass) {
-  const uint16_t accent = pass ? kGreen : kRed;
-  rect(0, 0, kWidth, kHeight, kBackground);
-  text(42, 28, "FINGERSPELL", 6, kWhite);
-  text(42, 87, "ON DEVICE AI", 3, kGreen);
-  rect(108, 137, 264, 264, kMuted);
-  for (int y = 0; y < 128; ++y) {
-    for (int x = 0; x < 128; ++x) {
-      const uint8_t* p = rgb + (y * 128 + x) * 3;
-      rect(112 + 2*x, 141 + 2*y, 2, 2, rgb565(p[0], p[1], p[2]));
-    }
+// A text field redrawn only when its string or colour changes: the box is cleared to
+// `fill` first, so a shorter string leaves no remains of the longer one.
+struct Field {
+  int x, y, w, h, scale;
+  uint16_t fill;
+  char last[48];
+  uint16_t last_color;
+  bool drawn;
+  void set(const char* value, uint16_t color) {
+    if (drawn && color == last_color && std::strncmp(value, last, sizeof(last)) == 0) return;
+    rect(x, y, w, h, fill);
+    text(x, y, value, scale, color);
+    std::strncpy(last, value, sizeof(last) - 1);
+    last[sizeof(last) - 1] = '\0';
+    last_color = color;
+    drawn = true;
   }
-  text(114, 418, "TEST IMAGE", 3, kMuted);
-  rect(24, 463, 432, 222, kCard);
-  const char letter[] = {predicted, '\0'};
-  text(54, 488, letter, 24, kWhite);
-  text(223, 490, "RESULT", 4, kMuted);
-  char percentage[8];
-  const int percent = static_cast<int>(confidence * 100.0f + 0.5f);
-  std::snprintf(percentage, sizeof(percentage), "%d%%", percent);
-  text(223, 537, percentage, 6, kWhite);
-  text(223, 600, "CONFIDENCE", 2, kMuted);
-  rect(223, 631, 186, 36, accent);
-  text(280, 638, pass ? "PASS" : "FAIL", 3, kBackground);
-  char expected_text[] = "EXPECTED  X";
-  expected_text[10] = expected;
-  text(110, 713, expected_text, 4, accent);
-  text(70, 768, "SAVED IMAGE DEMO", 3, kMuted);
+  void reset() { drawn = false; }
+};
+
+Field letter_field = {kLetterX, kLetterY, 6 * kLetterScale, 7 * kLetterScale, kLetterScale, kBackground, {}, 0, false};
+Field percent_field = {kPercentX, kPercentY, 4 * 6 * kPercentScale, 7 * kPercentScale, kPercentScale, kBackground, {}, 0, false};
+Field guess_field = {kCropX, kGuessY, kWidth - 2 * kCropX, 7 * kGuessScale, kGuessScale, kBackground, {}, 0, false};
+Field metrics_field = {kCropX, kMetricsY, kWidth - 2 * kCropX, 7 * kMetricsScale, kMetricsScale, kBackground, {}, 0, false};
+Field words_field[kWordsRows] = {
+    {36, kWordsY + 10 + 0 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false},
+    {36, kWordsY + 10 + 1 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false},
+    {36, kWordsY + 10 + 2 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false},
+    {36, kWordsY + 10 + 3 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false}};
+int bar_fill = -1;
+uint16_t bar_color;
+
+// The parts that never change: title, the crop's 1 px frame, the bar's trough, the words card.
+void draw_static() {
+  rect(0, 0, kWidth, kHeight, kBackground);
+  text((kWidth - 11 * 6 * 4) / 2, kTitleY, "FINGERSPELL", 4, kWhite);
+  rect(kCropX - 1, kCropY - 1, kCropSize + 2, 1, kMuted);
+  rect(kCropX - 1, kCropY + kCropSize, kCropSize + 2, 1, kMuted);
+  rect(kCropX - 1, kCropY, 1, kCropSize, kMuted);
+  rect(kCropX + kCropSize, kCropY, 1, kCropSize, kMuted);
+  rect(kBarX, kBarY, kBarW, kBarH, kCard);
+  rect(24, kWordsY, kWidth - 48, kWordsH, kCard);
+  letter_field.reset();
+  percent_field.reset();
+  guess_field.reset();
+  metrics_field.reset();
+  for (auto& f : words_field) f.reset();
+  bar_fill = -1;
+}
+
+// The crop pixel shown at preview position (px, py).
+inline const uint8_t* source_pixel(const uint8_t* rgb, int px, int py) {
+  const int x = kMirrorX ? FS_SIZE - 1 - px : px;
+  const int y = kFlipY ? FS_SIZE - 1 - py : py;
+  return rgb + (y * FS_SIZE + x) * 3;
+}
+
+// The 128x128 RGB888 crop scaled kCropScale times: each preview row is converted once into
+// a line buffer, which is then copied to kCropScale frame-buffer rows.
+void blit_crop(const uint8_t* rgb) {
+  static uint16_t line[kCropSize];
+  for (int sy = 0; sy < FS_SIZE; ++sy) {
+    uint16_t* l = line;
+    for (int sx = 0; sx < FS_SIZE; ++sx) {
+      const uint8_t* px = source_pixel(rgb, sx, sy);
+      const uint16_t v = rgb565(px[0], px[1], px[2]);
+      for (int k = 0; k < kCropScale; ++k) *l++ = v;
+    }
+    for (int k = 0; k < kCropScale; ++k)
+      std::memcpy(framebuffer + (kCropY + sy * kCropScale + k) * kWidth + kCropX, line, sizeof(line));
+  }
+  mark_rows(kCropY, kCropY + kCropSize - 1);
+}
+
+void draw_confidence(char letter, float conf, bool committed_colour) {
+  const char s[2] = {letter ? letter : '-', '\0'};
+  letter_field.set(s, letter ? (committed_colour ? kGreen : kWhite) : kMuted);
+  char pct[8];
+  std::snprintf(pct, sizeof(pct), "%d%%", static_cast<int>(conf * 100.0f + 0.5f));
+  percent_field.set(pct, kWhite);
+  int fill = static_cast<int>(conf * kBarW + 0.5f);
+  if (fill > kBarW) fill = kBarW;
+  const uint16_t color = committed_colour ? kGreen : kGrey;
+  if (fill != bar_fill || color != bar_color) {
+    rect(kBarX, kBarY, kBarW, kBarH, kCard);
+    rect(kBarX, kBarY, fill, kBarH, color);
+    bar_fill = fill;
+    bar_color = color;
+  }
+}
+
+// The decoder's text, last kWordsCols * kWordsRows characters, wrapped into the card.
+void draw_words(const char* words, int len, uint16_t color) {
+  const int visible = kWordsCols * kWordsRows;
+  const char* p = words + (len > visible ? len - visible : 0);
+  for (int row = 0; row < kWordsRows; ++row) {
+    char part[kWordsCols + 1] = {};
+    int i = 0;
+    for (; i < kWordsCols && *p; ++i) part[i] = *p++;
+    words_field[row].set(part, color);
+  }
+}
+
+// Push the rows written since the last call to memory for the CDC200.
+void flush() {
+  if (dirty_hi < dirty_lo) return;
+  uint16_t* start = framebuffer + dirty_lo * kWidth;
+  SCB_CleanDCache_by_Addr(start, (dirty_hi - dirty_lo + 1) * kWidth * static_cast<int>(sizeof(uint16_t)));
+  __DSB();
+  dirty_lo = kHeight;
+  dirty_hi = -1;
 }
 
 void display_event(uint32_t event) {
@@ -115,101 +265,107 @@ void display_event(uint32_t event) {
 }
 
 bool driver_ok(const char* stage, int32_t result) {
-  std::printf("LCD %s: %ld\n", stage, static_cast<long>(result));
-  std::fflush(stdout);
+  if (result != ARM_DRIVER_OK) {
+    std::printf("Display: CDC200 %s failed: %ld\n", stage, static_cast<long>(result));
+    std::fflush(stdout);
+  }
   return result == ARM_DRIVER_OK;
 }
 
-bool enable_display_power() {
+void enable_display_power() {
   // The D-PHYs are already powered by main.c (vbat_init) and by the camera; this
   // repeats it in case the display comes up first. Do not call SERVICES_set_run_cfg
   // with memory blocks here: on this board it once left MRAM/SRAM0 unusable until a
   // SETOOLS recovery (see board/DevKit-E8/README.md on hackathon-pico-faces).
   VBAT->PWR_CTRL &= ~((1u << 0) | (1u << 4) | (1u << 8) | (1u << 12));
   VBAT->PWR_CTRL &= ~((1u << 1) | (1u << 5) | (1u << 9));
-  return true;
 }
 }  // namespace
 
 bool fs_ui_init(void) {
   if (display_started) return true;
-  if (!enable_display_power()) return false;
-  rect(0, 0, kWidth, kHeight, kBackground);
-  SCB_CleanDCache_by_Addr(framebuffer, sizeof(framebuffer));
-  __DSB();
-  if (!driver_ok("initialize", Driver_CDC200.Initialize(display_event))) return false;
-  if (!driver_ok("power", Driver_CDC200.PowerControl(ARM_POWER_FULL))) return false;
-  if (!driver_ok("configure", Driver_CDC200.Control(
-          CDC200_CONFIGURE_DISPLAY, reinterpret_cast<uint32_t>(framebuffer)))) return false;
-  if (!driver_ok("start", Driver_CDC200.Start())) return false;
+  enable_display_power();
+  draw_static();
+  flush();
+  if (!driver_ok("Initialize", Driver_CDC200.Initialize(display_event))) return false;
+  if (!driver_ok("PowerControl", Driver_CDC200.PowerControl(ARM_POWER_FULL))) return false;
+  if (!driver_ok("Control", Driver_CDC200.Control(CDC200_CONFIGURE_DISPLAY,
+                                                  reinterpret_cast<uint32_t>(framebuffer))))
+    return false;
+  if (!driver_ok("Start", Driver_CDC200.Start())) return false;
   display_started = true;
+  std::printf("Display: %dx%d RGB565 panel started (frame buffer at 0x%08lx)\n", kWidth, kHeight,
+              reinterpret_cast<unsigned long>(framebuffer));
+  std::fflush(stdout);
   return true;
 }
 
 bool fs_display_result(const uint8_t* rgb, char predicted, float confidence,
                        char expected, bool pass) {
   if (!fs_ui_init()) return false;
-  render(rgb, predicted, confidence, expected, pass);
-  SCB_CleanDCache_by_Addr(framebuffer, sizeof(framebuffer));
-  __DSB();
-  std::printf("LCD ready: %c, expected %c, %s (saved image)\n",
-              predicted, expected, pass ? "PASS" : "FAIL");
-  std::fflush(stdout);
+  blit_crop(rgb);
+  draw_confidence(predicted, confidence, pass);
+  char line[48];
+  std::snprintf(line, sizeof(line), "TEST IMAGE %s  EXPECTED %c", pass ? "PASS" : "FAIL", expected);
+  guess_field.set(line, pass ? kGreen : kRed);
+  metrics_field.set("WAITING FOR THE CAMERA", kMuted);
+  draw_words("", 0, kWhite);
+  flush();
   return true;
 }
 
 void fs_display_set_frame(const uint8_t* rgb) { preview = rgb; }
 
+void fs_display_set_top3(const char letters[3], const float probs[3]) {
+  for (int i = 0; i < 3; ++i) {
+    top3_letters[i] = letters[i];
+    top3_probs[i] = probs[i];
+  }
+}
+
 void fs_ui_render(const fs_decoder_t* d, const fs_metrics_t* m, fs_event_t last_event) {
-  const auto& decoder = *d;
+  static float last_ui_ms;  // the previous frame's render time, shown in the metrics line
+  // The 100 MHz REFCLK counter (app_main's cycles_init enables it): the M55's DWT cycle
+  // counter does not run when the board boots without a debugger.
+  const uint32_t t0 = REFCLK_CNTRead->CNTCVL;
   if (!display_started) {
-    std::printf("%s|%c|%.2f|%.1f|%.1f\n", decoder.text,
-                decoder.live ? decoder.live : '-', decoder.live_conf, m->fps, m->npu_ms);
+    // UART fallback from the contract: "TEXT|live|conf|fps|npu_ms", one line per frame.
+    if (!fallback_announced) {
+      std::printf("Display: not started, UART fallback lines follow\n");
+      fallback_announced = true;
+    }
+    std::printf("%s|%c|%.2f|%.1f|%.1f\n", d->text, d->live ? d->live : '-', d->live_conf, m->fps,
+                m->npu_ms);
     return;
   }
-  const uint8_t* rgb = preview;
   if (display_errors) {
-    std::printf("LCD DSI error event: 0x%lx\n", static_cast<unsigned long>(display_errors));
+    std::printf("Display: DSI error event 0x%lx\n", static_cast<unsigned long>(display_errors));
     display_errors = 0;
   }
-  rect(0, 0, kWidth, kHeight, kBackground);
-  text(42, 22, "FINGERSPELL", 6, kWhite);
-  text(36, 78, "BOARD CAMERA  E8 NPU", 3, kGreen);
-  rect(108, 111, 264, 264, kMuted);
-  if (rgb) {
-    for (int y = 0; y < 128; ++y)
-      for (int x = 0; x < 128; ++x) {
-        const auto* p = rgb + (y * 128 + x) * 3;
-        rect(112 + 2*x, 115 + 2*y, 2, 2, rgb565(p[0], p[1], p[2]));
-      }
-  } else {
-    rect(112, 115, 256, 256, kCard);
-    text(143, 220, "NO IMAGE", 3, kMuted);
-  }
-  char state[40];
-  if (decoder.live) {
-    std::snprintf(state, sizeof(state), "LIVE %c  %d%%", decoder.live,
-                  static_cast<int>(decoder.live_conf * 100 + 0.5f));
-  } else {
-    std::snprintf(state, sizeof(state), "SHOW A LETTER");
-  }
-  text(28, 400, state, 3, decoder.live ? kGreen : kMuted);
-  text(30, 448, "YOUR WORDS", 3, kMuted);
-  rect(24, 482, 432, 215, kCard);
-  const char* visible = decoder.text + (decoder.len > 52 ? decoder.len - 52 : 0);
-  if (!*visible) text(48, 520, "SPELL A WORD", 5, kMuted);
-  for (int row = 0; row < 4 && *visible; ++row) {
-    char part[14] = {};
-    int i = 0;
-    for (; i < 13 && *visible; ++i) part[i] = *visible++;
-    text(44, 498 + row * 49, part, 5, last_event == FS_EV_LETTER ? kGreen : kWhite);
-  }
-  std::snprintf(state, sizeof(state), "NPU %d MS  FPS %d", static_cast<int>(m->npu_ms + 0.5f),
-                static_cast<int>(m->fps + 0.5f));
-  text(30, 720, state, 3, kMuted);
-  text(66, 766, "HOLD A LETTER", 4, kMuted);
-  // The controller reads SRAM directly, so publish the CPU's drawing first.
-  SCB_CleanDCache_by_Addr(framebuffer, sizeof(framebuffer));
-  __DSB();
+  if (preview) blit_crop(preview);
+
+  // The model's top letter and its probability, green once the decoder holds it above
+  // its commit threshold (d->live), white below.
+  const char letter = top3_letters[0] ? top3_letters[0] : d->live;
+  const float conf = top3_letters[0] ? top3_probs[0] : d->live_conf;
+  draw_confidence(letter, conf, d->live != 0);
+
+  char line[48];
+  if (top3_letters[1])
+    std::snprintf(line, sizeof(line), "THEN %c %d%%  %c %d%%", top3_letters[1],
+                  static_cast<int>(top3_probs[1] * 100.0f + 0.5f), top3_letters[2],
+                  static_cast<int>(top3_probs[2] * 100.0f + 0.5f));
+  else
+    std::snprintf(line, sizeof(line), "SHOW A LETTER");
+  guess_field.set(line, kMuted);
+
+  std::snprintf(line, sizeof(line), "CAM %d NPU %d UI %d MS  %d FPS",
+                static_cast<int>(m->camera_ms + 0.5f), static_cast<int>(m->npu_ms + 0.5f),
+                static_cast<int>(last_ui_ms + 0.5f), static_cast<int>(m->fps + 0.5f));
+  metrics_field.set(line, kMuted);
+
+  draw_words(d->text, d->len, last_event == FS_EV_LETTER ? kGreen : kWhite);
+  flush();
+  last_ui_ms = (REFCLK_CNTRead->CNTCVL - t0) * 1000.0f / SystemREFClock;
 }
 #endif

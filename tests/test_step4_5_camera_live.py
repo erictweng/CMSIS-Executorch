@@ -26,7 +26,7 @@ import fs_tools as fs
 SRC = fs.REPO / "src"
 LIVE = re.compile(
     r"^([A-Y]) (\d\.\d\d) ([A-Y]) (\d\.\d\d) ([A-Y]) (\d\.\d\d) \| cam ([\d.]+)ms pre ([\d.]+)ms "
-    r"npu ([\d.]+)ms \| ([\d.]+) fps$", re.M)
+    r"npu ([\d.]+)ms(?: ui [\d.]+ms)? \| ([\d.]+) fps$", re.M)  # ui: with the LCD build
 PROBE = re.compile(r"^probe frame (\d+) \| px((?: [0-9a-f]{4}){8}) \| mean (\d+)$", re.M)
 PROBE_DONE = re.compile(r"^probe done: (\d+) frames in ([\d.]+) s = ([\d.]+) fps "
                         r"\(overflows (\d+) errors (\d+) restarts (\d+)\)$", re.M)

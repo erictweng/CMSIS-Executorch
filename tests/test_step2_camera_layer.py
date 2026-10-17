@@ -82,7 +82,7 @@ class LayerConfig(unittest.TestCase):
         defines = {k: v for d in layer()["define"] for k, v in (d.items() if isinstance(d, dict) else [(d, None)])}
         self.assertEqual(defines["APP_POOL_SECTION"], '\\".bss.ai_pool\\"')
         self.assertEqual(defines["APP_METHOD_POOL_SIZE"], 0x100000)
-        self.assertEqual(defines["APP_TEMP_POOL_SIZE"], 0x200000)
+        self.assertEqual(defines["APP_TEMP_POOL_SIZE"], 0x100000)  # 1 MB since the display: all of SRAM0 is shared
 
 
 class RteConfig(unittest.TestCase):
@@ -116,11 +116,14 @@ class RteConfig(unittest.TestCase):
         new = dict(re.findall(r"^#define\s+(\w+)\s+(\S+)", fs.RTE_DEVICE.read_text(), re.M))
         changed = {k for k in old.keys() & new.keys() if old[k] != new[k]}
         # Step 2: image config 5. Step 4: CPI streaming mode with 3 frame buffers.
-        self.assertEqual(changed, {"RTE_MT9M114_CAMERA_SENSOR_MIPI_IMAGE_CONFIG",
-                                   "RTE_CPI_STREAMING_ENABLE", "RTE_CPI_NUM_ACTIVE_FRAMEBUFFERS"})
+        # Display: RGB565 frame buffer (test_display.py). Whatever the base ref already
+        # has is not a change; nothing else may differ.
+        self.assertLessEqual(changed, {"RTE_MT9M114_CAMERA_SENSOR_MIPI_IMAGE_CONFIG",
+                                       "RTE_CPI_STREAMING_ENABLE", "RTE_CPI_NUM_ACTIVE_FRAMEBUFFERS",
+                                       "RTE_CDC200_PIXEL_FORMAT"})
         self.assertEqual(set(old) - set(new), set())
-        self.assertEqual(set(new) - set(old),
-                         {f"RTE_I2C{n}_{l}_STUCK_LOW_TIMEOUT" for n in range(4) for l in ("SCL", "SDA")})
+        self.assertLessEqual(set(new) - set(old),
+                             {f"RTE_I2C{n}_{l}_STUCK_LOW_TIMEOUT" for n in range(4) for l in ("SCL", "SDA")})
 
 
 @unittest.skipIf(os.environ.get("FS_SKIP_BUILD") == "1" and not fs.AXF.exists(), "no build to reuse")

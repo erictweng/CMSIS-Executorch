@@ -92,6 +92,29 @@ to UART4. That task writes the boot table that starts the M55_HP from `0x8020000
    loop should not return from `main()`.
 7. **J-Link: keep SWD.** JTAG makes the generated load task block on a prompt.
 
+## Display (DevKit-E8 LCD)
+
+The 4.3" LCD (ILI9806E, 480x800, J21) shows what the camera sees and what the model
+thinks, every frame: the 128x128 hand-box crop scaled 3x (a mirror image), the top
+letter in big type with its probability and a bar (green from the decoder's 0.60
+commit threshold up), the 2nd/3rd guesses, `CAM/NPU/UI` times and fps, and the
+committed text. Code: `src/fs_display.cpp` (`fs_ui_init`, `fs_ui_render` from
+`src/fs_api.h`), built for DevKit-E8 only (`FINGERSPELL_LCD`); details in
+`board/DevKit-E8/README.md`. The live UART line gains `ui x.xms`:
+
+    X 0.30 U 0.21 M 0.06 | cam 25.0ms pre 1.0ms npu 7.8ms ui 1.9ms | 19.5 fps
+
+Three board fixes came with it (found on `hackathon-pico-faces`): bulk SRAM starts
+64 kB above `0x02000000` so the camera ring no longer overwrites the A32 boot stub
+the ATOC loads there; everything the NPU and the CDC200 read stays in SRAM0
+(`SRAM0_SRAM1_COMBINED 0`, temp pool 1 MB); `main()` cleans and invalidates the
+caches first, so a warm reset after a flash does not run stale lines of the
+previous image. The stage timings now come from the SoC's 100 MHz REFCLK counter: the M55's DWT
+cycle counter only runs while a debugger is attached, so a board that booted on its
+own printed `0.0ms`. Tests: `tests/test_display.py` (`FS_HW=1` flashes and checks the
+panel message, the `ui` time < 10 ms at >= 15 fps, the frame buffer changing with
+the camera, and a warm reset).
+
 ## Next
 
 - S1 camera: capture frames from the DevKit camera, crop the fixed hand box to 128x128
