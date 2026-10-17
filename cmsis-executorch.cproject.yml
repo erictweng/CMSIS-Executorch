@@ -36,6 +36,9 @@ project:
         - file: ./src/fs_camera.c
           for-context: +DevKit-E8
         - file: ./src/fs_camera.h
+        # Decoder (fs_api.h): per-frame letter probabilities to text. Pure C99, no
+        # hardware, for every target; host tests in tests/host/test_fs_decoder.c.
+        - file: ./src/fs_decoder.c
 
   layers:
     - layer: $Board-Layer$
