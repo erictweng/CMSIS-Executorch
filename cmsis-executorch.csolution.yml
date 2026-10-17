@@ -118,7 +118,7 @@ solution:
   # keys under model: are passed through to create_ai_layer.py.
   # https://open-cmsis-pack.github.io/cmsis-toolbox/build-overview/#mlops-information
   mlops:
-    description: TinyCNN int8 image classifier for Ethos-U85
+    description: Fingerspell 24-letter ASL classifier (MobileNetV2-0.5, int8) for Ethos-U85
     npu:
       type: Ethos-U85 # explicit: the Ensemble pack lists an Ethos-U55 first
     vela:
@@ -130,8 +130,8 @@ solution:
       memory: Shared_Sram
     model:
       clayer: $AI-Layer$
-      name: TinyCNN
+      name: FingerspellLetters
       # Model parameters for create_ai_layer.py: the NHWC input shape and the
       # number of samples the quantizer is calibrated with.
-      input-shape: 1x16x16x3
-      calibration-samples: 2
+      input-shape: 1x128x128x3
+      calibration-samples: 300
