@@ -1,16 +1,14 @@
-// Copyright 2026 Arm Limited and/or its affiliates.
-// SPDX-License-Identifier: Apache-2.0
+// Fingerspell — app_main.cpp for Arm-Examples/CMSIS-Executorch@hackathon (replaces src/app_main.cpp).
 //
-// Headless ExecuTorch runner for the Ethos-U85 example. Loads the .pte
-// embedded by the AI layer (model_pte.h, see create_ai_layer.py), runs one
-// inference on the NPU, and prints the output logits. Built entirely from the
-// PyTorch::ExecuTorch pack's runtime + operator components; the board layer
-// provides main(), stdout and the Ethos-U driver init and then calls app_main.
+// G1 board test: runs the 24-letter model on a baked-in 128x128 RGB test crop (test_image.h, made by
+// ml/make_test_image.py from the held-out split) and prints the top-3 letters plus the expected one.
+// Tomorrow the camera frame replaces kTestImage; preprocess_rgb888() is the contract for that.
 //
-// EmbeddedModule (arm_embedded_module.hpp) manages program loading, method
-// memory and execution, like ExecuTorch's Module class does on POSIX hosts.
+// Input contract: 1x128x128x3 NHWC float, value = uint8 / 255 (normalization is inside the model).
+// Output: 24 float logits in kLabels order (A..Y without J).
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -23,6 +21,7 @@
 
 #include "arm_embedded_module.hpp"
 #include "model_pte.h"
+#include "test_image.h"  // kTestImage[128*128*3] (uint8 RGB), kTestExpected (char)
 
 using arm::embedded::EmbeddedModule;
 using executorch::aten::DimOrderType;
@@ -36,15 +35,11 @@ using executorch::runtime::MemoryAllocator;
 
 namespace {
 
-// Pool sizes and placement are board-overridable: a board layer that cannot
-// fit 8 MB of .bss in its default RAM sets APP_*_POOL_SIZE and, via
-// APP_POOL_SECTION, the linker section its linker script routes to a larger
-// (NPU-accessible) memory.
 #ifndef APP_METHOD_POOL_SIZE
 #define APP_METHOD_POOL_SIZE (4 * 1024 * 1024)
 #endif
 #ifndef APP_TEMP_POOL_SIZE
-#define APP_TEMP_POOL_SIZE (4 * 1024 * 1024)  // Ethos-U scratch is drawn from here.
+#define APP_TEMP_POOL_SIZE (4 * 1024 * 1024)
 #endif
 #ifdef APP_POOL_SECTION
 #define APP_POOL_ATTRIBUTES __attribute__((section(APP_POOL_SECTION)))
@@ -54,16 +49,25 @@ namespace {
 
 constexpr size_t kMethodPoolSize = APP_METHOD_POOL_SIZE;
 constexpr size_t kTempPoolSize = APP_TEMP_POOL_SIZE;
-
 alignas(16) uint8_t g_method_pool[kMethodPoolSize] APP_POOL_ATTRIBUTES;
 alignas(16) uint8_t g_temp_pool[kTempPoolSize] APP_POOL_ATTRIBUTES;
+
+constexpr int kSize = 128;
+constexpr int kClasses = 24;
+constexpr char kLabels[kClasses + 1] = "ABCDEFGHIKLMNOPQRSTUVWXY";
+
+alignas(16) float g_input[kSize * kSize * 3];
+
+// uint8 RGB888 (HWC) -> float [0,1] NHWC. The camera path will call this on the cropped box.
+void preprocess_rgb888(const uint8_t* rgb, float* out) {
+  for (int i = 0; i < kSize * kSize * 3; ++i) out[i] = rgb[i] * (1.0f / 255.0f);
+}
 
 }  // namespace
 
 extern "C" int app_main(void) {
   executorch::runtime::runtime_init();
-
-  printf("ExecuTorch Ethos-U85 example: %lu byte model\n", model_pte_size);
+  printf("Fingerspell letters: %lu byte model\n", model_pte_size);
 
   EmbeddedModule module(
       model_pte, model_pte_size,
@@ -71,43 +75,39 @@ extern "C" int app_main(void) {
       std::make_unique<MemoryAllocator>(kMethodPoolSize, g_method_pool),
       std::make_unique<MemoryAllocator>(kTempPoolSize, g_temp_pool));
 
-  // TinyCNN takes one 16x16 RGB image in NHWC order (see model/model.py),
-  // filled here with a deterministic ramp. The tensor only wraps the buffer;
-  // no tensor extension (and its std::random_device) is needed for that.
-  alignas(16) static float input_data[16 * 16 * 3];
-  for (size_t i = 0; i < sizeof(input_data) / sizeof(input_data[0]); ++i) {
-    input_data[i] = static_cast<float>(i % 32) / 32.0f - 0.5f;
-  }
-  std::array<SizesType, 4> sizes{1, 16, 16, 3};
+  preprocess_rgb888(kTestImage, g_input);
+  std::array<SizesType, 4> sizes{1, kSize, kSize, 3};
   std::array<DimOrderType, 4> dim_order{0, 1, 2, 3};
-  TensorImpl input_impl(ScalarType::Float, sizes.size(), sizes.data(), input_data, dim_order.data());
+  TensorImpl input_impl(ScalarType::Float, sizes.size(), sizes.data(), g_input, dim_order.data());
   Tensor input(&input_impl);
 
   auto outputs = module.forward(input);
-  if (!outputs.ok()) {
-    printf("forward failed (err=%u)\n", static_cast<unsigned>(outputs.error()));
+  if (!outputs.ok() || outputs->empty() || !outputs->front().isTensor()) {
+    printf("forward failed (err=%u)\n", outputs.ok() ? 0u : static_cast<unsigned>(outputs.error()));
     return 1;
   }
-  if (outputs->empty()) {
-    printf("forward returned no outputs\n");
+  Tensor t = outputs->front().toTensor();
+  if (t.numel() != kClasses || t.scalar_type() != ScalarType::Float) {
+    printf("unexpected output: %u elements\n", static_cast<unsigned>(t.numel()));
     return 1;
   }
+  const float* logits = t.const_data_ptr<float>();
 
-  const EValue& out = outputs->front();
-  if (out.isTensor()) {
-    Tensor t = out.toTensor();
-    printf("Output: %u element(s):", static_cast<unsigned>(t.numel()));
-    if (t.scalar_type() == ScalarType::Float) {
-      const float* p = t.const_data_ptr<float>();
-      for (size_t i = 0; i < t.numel(); ++i) {
-        printf(" %.4f", p[i]);
-      }
-    }
-    printf("\n");
-  }
+  // softmax + top-3
+  float mx = logits[0];
+  for (int i = 1; i < kClasses; ++i) mx = logits[i] > mx ? logits[i] : mx;
+  float prob[kClasses], sum = 0.f;
+  for (int i = 0; i < kClasses; ++i) sum += (prob[i] = std::exp(logits[i] - mx));
+  int top[3] = {-1, -1, -1};
+  for (int k = 0; k < 3; ++k)
+    for (int i = 0; i < kClasses; ++i)
+      if ((k == 0 || i != top[0]) && (k < 2 || i != top[1]) && (top[k] < 0 || prob[i] > prob[top[k]])) top[k] = i;
 
-  printf("Test_result: PASS\n");
-  printf("\x04");  // EOT: ends the FVP run (semihosting exit); a board just sees a 0x04
+  printf("Top-3: %c %.2f | %c %.2f | %c %.2f   (expected %c)\n", kLabels[top[0]], prob[top[0]] / sum,
+         kLabels[top[1]], prob[top[1]] / sum, kLabels[top[2]], prob[top[2]] / sum, kTestExpected);
+  bool pass = kLabels[top[0]] == kTestExpected;
+  printf("Test_result: %s\n", pass ? "PASS" : "FAIL");
+  printf("\x04");
   fflush(stdout);
-  return 0;
+  return pass ? 0 : 1;
 }
