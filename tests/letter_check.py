@@ -40,7 +40,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--letters", default=LABELS, help="letters to test (default: all 24)")
     ap.add_argument("--seconds", type=float, default=3.0, help="seconds of live output per letter")
-    ap.add_argument("--save-crops", action="store_true", help="save one camera crop per letter as PNG")
+    ap.add_argument("--save-crops", action="store_true",
+                    help="also save one camera crop per letter as PNG (asks the board over J-Link; "
+                         "experimental: run without it if the board stops responding)")
     args = ap.parse_args()
     letters = [c for c in args.letters.upper() if c in LABELS]
 
@@ -53,13 +55,18 @@ def main() -> int:
             return 2
         for letter in letters:
             input(f"\nSign  {letter}  in front of the camera and press Enter (keep holding)... ")
+            print(f"  reading {args.seconds:.0f} s of live predictions...", flush=True)
             preds = read_window(uart, args.seconds)
+            if not preds:
+                print("  no live lines from the board: check it is running (SW4 on UART4); stopping")
+                break
             votes = collections.Counter(p for p, _ in preds)
             top, n = votes.most_common(1)[0] if votes else ("?", 0)
             conf = [c for p, c in preds if p == letter]
             hit = top == letter
             crop_png = None
             if args.save_crops:
+                print("  saving the camera picture over J-Link + UART (~10 s, keep holding)...", flush=True)
                 w, h, _, rgb = fs.capture_crop(uart)
                 crop_png = OUT / f"letter-{stamp}-{letter}.png"
                 fs.write_png(crop_png, w, h, rgb, scale=2)
@@ -70,6 +77,8 @@ def main() -> int:
             others = ", ".join(f"{k} {v}" for k, v in votes.most_common(4))
             print(f"  {'OK  ' if hit else 'MISS'} read as {top} in {n}/{len(preds)} frames  ({others})")
 
+    if not results:
+        return 2
     hits = sum(r["hit"] for r in results)
     misses = [f"{r['letter']}->{r['read_as']}" for r in results if not r["hit"]]
     print(f"\nScore: {hits}/{len(results)} letters" + (f"; misses: {', '.join(misses)}" if misses else ""))
