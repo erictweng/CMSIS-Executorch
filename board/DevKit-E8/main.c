@@ -28,8 +28,37 @@
 
 #include "se_services_port.h"
 
+#if defined(RTE_Drivers_CPI)
+#include "cpi.h"
+#include "sys_ctrl_cpi.h"
+
+/*
+ * A core reset (J-Link, debugger) does not reset the camera controller: a capture
+ * left running keeps DMA-ing frames into SRAM, and with that going on the Secure
+ * Enclave handshake below hung until a power cycle. Stop it first. Only touch the
+ * CPI when its clock is on: accessing it with the clock off locks the bus.
+ */
+static void stop_leftover_camera_capture(void)
+{
+    if ((CLKCTL_PER_MST->PERIPH_CLK_ENA & PERIPH_CLK_ENA_CPI_CKEN) == 0U) {
+        return; /* not started since power-up */
+    }
+    CPI->CAM_INTR_ENA = 0U;
+    cpi_stop_capture(CPI);
+    for (uint32_t i = 0U; i < 10000000U; i++) { /* the frame in flight ends within ~35 ms */
+        if (cpi_get_capture_status(CPI) == CPI_VIDEO_CAPTURE_STATUS_NOT_CAPTURING) {
+            break;
+        }
+    }
+}
+#endif
+
 int main(void)
 {
+#if defined(RTE_Drivers_CPI)
+    stop_leftover_camera_capture();
+#endif
+
     /* Apply the Conductor pin configuration (includes the UART4 console pins) */
     board_pins_config();
 
