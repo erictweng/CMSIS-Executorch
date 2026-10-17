@@ -84,3 +84,6 @@ fvp_stdout.log
 !.vscode/fvp.sh
 !.vscode/fvp.Dockerfile
 !.vscode/launch.json.mac
+
+# Python bytecode from the board tests
+__pycache__/
