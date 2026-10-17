@@ -200,10 +200,11 @@ class Build(unittest.TestCase):
         self.assertEqual(base, 0x80200000, "the debug stub's boot address")
         self.assertLessEqual(size, limit, f"image {size:#x} overflows LR_ROM {limit:#x}")
 
-    def test_app_model_and_ai_layer_are_unchanged(self):
+    def test_model_and_ai_layer_are_unchanged(self):
+        # (src/ is unchanged in step 2 itself; later steps add the camera code there.)
         if git("rev-parse", "--verify", BASE_REF).returncode:
             self.skipTest(f"base ref {BASE_REF} not available")
-        r = git("diff", "--stat", BASE_REF, "--", "src", "model", "ai_layer/ai_layer.clayer.yml",
+        r = git("diff", "--stat", BASE_REF, "--", "model", "ai_layer/ai_layer.clayer.yml",
                 "ai_layer/model_pte.c", "ai_layer/model_pte.h")
         self.assertEqual(r.stdout.strip(), "", r.stdout)
 
@@ -221,7 +222,7 @@ class OnBoard(unittest.TestCase):
         except fs.UartBusy as e:
             cls.uart_error = str(e)
         cls.flash_log = fs.flash_and_start()
-        cls.console = cls.uart.read_for(30, until=b"Test_result:") if cls.uart else ""
+        cls.console = cls.uart.read_for(fs.BOOT_TIMEOUT, until=b"Test_result:") if cls.uart else ""
         if cls.uart:
             cls.console = cls.uart.read_for(1)  # the rest of the line
             cls.uart.close()

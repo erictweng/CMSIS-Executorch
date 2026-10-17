@@ -23,6 +23,12 @@
 #include "model_pte.h"
 #include "test_image.h"  // kTestImage[128*128*3] (uint8 RGB), kTestExpected (char)
 
+#include "RTE_Components.h"
+#ifdef RTE_VSTREAM_VIDEOIN  // board layer with the MT9M114 camera (DevKit-E8)
+#include "fs_camera.h"
+#define FS_HAVE_CAMERA 1
+#endif
+
 using arm::embedded::EmbeddedModule;
 using executorch::aten::DimOrderType;
 using executorch::aten::ScalarType;
@@ -67,6 +73,11 @@ void preprocess_rgb888(const uint8_t* rgb, float* out) {
 
 extern "C" int app_main(void) {
   executorch::runtime::runtime_init();
+#ifdef FS_HAVE_CAMERA
+  // Prints "camera init OK 320x320 RGB565" or the stage that failed; the model test
+  // below runs either way (it still uses the baked-in crop).
+  fs_camera_init();
+#endif
   printf("Fingerspell letters: %lu byte model\n", model_pte_size);
 
   EmbeddedModule module(
@@ -106,6 +117,16 @@ extern "C" int app_main(void) {
   printf("Top-3: %c %.2f | %c %.2f | %c %.2f   (expected %c)\n", kLabels[top[0]], prob[top[0]] / sum,
          kLabels[top[1]], prob[top[1]] / sum, kLabels[top[2]], prob[top[2]] / sum, kTestExpected);
   bool pass = kLabels[top[0]] == kTestExpected;
+#ifdef FS_HAVE_CAMERA
+  // Frames the CPI has delivered since fs_camera_init() (streaming, unread for now).
+  // Stop it before main() returns: a capture still running across the next core
+  // reset left the Secure Enclave unresponsive at boot.
+  fs_camera_stop();
+  printf("camera frames %lu errors %lu (infifo %lu outfifo %lu bus %lu csi2 %lu)\n",
+         (unsigned long)g_fs_camera_frames, (unsigned long)g_fs_camera_errors,
+         (unsigned long)g_fs_camera_events[3], (unsigned long)g_fs_camera_events[4],
+         (unsigned long)g_fs_camera_events[5], (unsigned long)g_fs_camera_events[6]);
+#endif
   printf("Test_result: %s\n", pass ? "PASS" : "FAIL");
   printf("\x04");
   fflush(stdout);
