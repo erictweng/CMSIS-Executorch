@@ -224,3 +224,60 @@ class UartCapture:
 
     def __exit__(self, *exc):
         self.close()
+
+
+# ---- camera crop dump -> PNG -------------------------------------------------------
+
+def jlink_write_word(addr: int, value: int) -> str:
+    return jlink(["h", f"w4 0x{addr:08X} 0x{value:08X}", "g"])
+
+
+def parse_crop_dump(text: str) -> tuple[int, int, int, bytes]:
+    """Parse the last 'CROPDUMP BEGIN w h frame n' ... 'CROPDUMP END' block: (w, h, frame, RGB bytes)."""
+    m = list(re.finditer(r"CROPDUMP BEGIN (\d+) (\d+) frame (\d+)\r?\n(.*?)CROPDUMP END", text, re.S))
+    if not m:
+        raise ValueError("no complete CROPDUMP block in the UART text")
+    w, h, frame, body = int(m[-1].group(1)), int(m[-1].group(2)), int(m[-1].group(3)), m[-1].group(4)
+    rows = [r.strip() for r in body.splitlines() if r.strip()]
+    if len(rows) != h or any(len(r) != w * 6 for r in rows):
+        raise ValueError(f"malformed dump: {len(rows)} rows")
+    return w, h, frame, bytes.fromhex("".join(rows))
+
+
+def write_png(path: Path, w: int, h: int, rgb: bytes, scale: int = 1) -> None:
+    import struct
+    import zlib
+    rows = []
+    for y in range(h):
+        row = rgb[y * w * 3:(y + 1) * w * 3]
+        if scale > 1:
+            row = b"".join(row[x * 3:x * 3 + 3] * scale for x in range(w))
+        rows += [b"\x00" + row] * scale
+
+    def chunk(t: bytes, d: bytes) -> bytes:
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w * scale, h * scale, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b"")
+    Path(path).write_bytes(png)
+
+
+def capture_crop(uart: "UartCapture", timeout: float = 30) -> tuple[int, int, int, bytes]:
+    """Ask the running live loop for one crop dump and return it (needs the UART open)."""
+    uart.data.clear()
+    jlink_write_word(symbol_address("g_fs_dump_request"), 1)
+    uart.read_for(timeout, until=b"CROPDUMP END")
+    return parse_crop_dump(uart.text)
+
+
+def app_problem(state: dict) -> str | None:
+    """None when the app is healthy: either still running (DevKit-E8: the live camera loop
+    never returns) or ended normally (main() returned: _sys_exit's semihosting BKPT faults
+    with DEBUGEVT and no memory, bus or usage fault). Otherwise a description."""
+    if state["exception"] == "NoException" or state["ipsr"] == 0:
+        return None
+    if state["exception"] == "HardFault" and state["hfsr"] == 0x80000000 and state["cfsr"] == 0:
+        sys_exit = symbol_address("_sys_exit")
+        if sys_exit <= state.get("stacked_pc", 0) < sys_exit + 16:
+            return None
+    return f"fault: {state['exception']} HFSR={state['hfsr']:#x} CFSR={state['cfsr']:#x} PC={state['pc']:#x}"

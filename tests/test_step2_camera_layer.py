@@ -115,7 +115,9 @@ class RteConfig(unittest.TestCase):
         old = dict(re.findall(r"^#define\s+(\w+)\s+(\S+)", base.stdout, re.M))
         new = dict(re.findall(r"^#define\s+(\w+)\s+(\S+)", fs.RTE_DEVICE.read_text(), re.M))
         changed = {k for k in old.keys() & new.keys() if old[k] != new[k]}
-        self.assertEqual(changed, {"RTE_MT9M114_CAMERA_SENSOR_MIPI_IMAGE_CONFIG"})
+        # Step 2: image config 5. Step 4: CPI streaming mode with 3 frame buffers.
+        self.assertEqual(changed, {"RTE_MT9M114_CAMERA_SENSOR_MIPI_IMAGE_CONFIG",
+                                   "RTE_CPI_STREAMING_ENABLE", "RTE_CPI_NUM_ACTIVE_FRAMEBUFFERS"})
         self.assertEqual(set(old) - set(new), set())
         self.assertEqual(set(new) - set(old),
                          {f"RTE_I2C{n}_{l}_STUCK_LOW_TIMEOUT" for n in range(4) for l in ("SCL", "SDA")})
@@ -234,15 +236,10 @@ class OnBoard(unittest.TestCase):
     def test_reset_vector_points_at_this_build(self):
         self.assertEqual(fs.read_word(0x80200004) & ~1, fs.symbol_address("Reset_Handler") & ~1)
 
-    def test_app_runs_to_its_normal_exit(self):
-        """main() returns: _sys_exit's semihosting BKPT faults without a debugger (DEBUGEVT),
-        with no memory, bus or usage fault on the way."""
+    def test_app_is_healthy(self):
+        """Running (the live camera loop never returns) or ended normally; no fault."""
         st = fs.core_state()
-        self.assertEqual(st["exception"], "HardFault", st)
-        self.assertEqual(st["hfsr"], 0x80000000, st)
-        self.assertEqual(st["cfsr"], 0, st)
-        sys_exit = fs.symbol_address("_sys_exit")
-        self.assertTrue(sys_exit <= st["stacked_pc"] < sys_exit + 16, f"stacked PC {st['stacked_pc']:#x}")
+        self.assertIsNone(fs.app_problem(st), st)
 
     def test_uart_reports_pass(self):
         if self.uart_error:

@@ -103,13 +103,13 @@
 // <o> CPI number of active framebuffers
 // <i> Defines CPI number of active framebuffers
 // <i> Default: 2
-#define RTE_CPI_NUM_ACTIVE_FRAMEBUFFERS                       0
+#define RTE_CPI_NUM_ACTIVE_FRAMEBUFFERS                       3
 
 // <o> Enable CPI streaming
 // <0=> Disable
 // <1=> Enable
 // <i> Default: 1
-#define RTE_CPI_STREAMING_ENABLE                              0
+#define RTE_CPI_STREAMING_ENABLE                              1
 
 // <e> MT9M114 [Driver_MT9M114]
 // <o> Enable/Disable MT9M114 camera sensor
