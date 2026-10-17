@@ -6,8 +6,9 @@
 # Boards/DevKit-e8/Layers/M55_HP/Board_HP-U85.clayer.yml and trimmed to what a
 # headless ExecuTorch inference runner needs: device startup, the Secure
 # Enclave services (clocks, pin mux), a UART-backed stdout on the PRG USB
-# connector, and the Ethos-U driver. Camera, display, Ethernet, USB, VIO and
-# the vStream drivers are omitted.
+# connector, the Ethos-U driver, and the MT9M114 camera on MIPI CSI-2 (CPI
+# driver behind the vStream VideoIn interface) for live input. Display,
+# Ethernet, USB, VIO and the other vStream drivers are omitted.
 layer:
   type: Board
   description: DevKit-E8 board setup for headless Ethos-U85 inference on M55_HP
@@ -24,6 +25,7 @@ layer:
         - STDIN
         - STDOUT
         - STDERR
+        - CMSIS_VSTREAM_VIDEO_IN
         - Heap: 98304
 
   define:
@@ -43,6 +45,7 @@ layer:
     - pack: AlifSemiconductor::Ensemble@^2.2.0-0
     - pack: ARM::CMSIS@^6.2.0
     - pack: ARM::CMSIS-Compiler@^2.1.0
+    - pack: ARM::CMSIS-Driver@^2.10.0
     - pack: ARM::ethos-u-core-driver@^1.26.2
 
   misc:
@@ -55,17 +58,29 @@ layer:
 
     - component: BSP:Board Config
     - component: BSP:DevKit Config&DevKit-e8
+    # Camera: MT9M114 sensor (configured over I2C1) on MIPI CSI-2, captured by
+    # the CPI into SRAM via DMA. The image format is
+    # RTE_MT9M114_CAMERA_SENSOR_MIPI_IMAGE_CONFIG in RTE_Device.h (5 = 320x320
+    # RGB565: square, no Bayer demosaicing on the CPU).
+    - component: BSP:External peripherals:CAMERA Sensor MT9M114
 
     - component: CMSIS:CORE
 
+    - component: CMSIS Driver:I2C
     - component: CMSIS Driver:USART
+    - component: CMSIS Driver:vStream:VideoIn&DevKit-E8
 
     - component: CMSIS-Compiler:CORE
     - component: CMSIS-Compiler:STDERR:Custom
     - component: CMSIS-Compiler:STDIN:Custom
     - component: CMSIS-Compiler:STDOUT:Custom
 
+    - component: Device:SOC Peripherals:CPI
+    - component: Device:SOC Peripherals:DMA
+    - component: Device:SOC Peripherals:GPIO
     - component: Device:SOC Peripherals:MHU
+    - component: Device:SOC Peripherals:MIPI CSI2
+    - component: Device:SOC Peripherals:MIPI DSI CSI2 DPHY
     - component: Device:SOC Peripherals:PINCONF
 
     - component: Machine Learning:NPU Support:Ethos-U Driver&Generic U85
