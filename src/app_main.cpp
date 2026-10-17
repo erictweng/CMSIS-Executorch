@@ -28,6 +28,9 @@
 #include "test_image.h"  // kTestImage[128*128*3] (uint8 RGB), kTestExpected (char)
 
 #include "RTE_Components.h"
+#ifdef FINGERSPELL_LCD
+#include "fs_display.h"
+#endif
 #ifdef RTE_VSTREAM_VIDEOIN  // board layer with the MT9M114 camera (DevKit-E8)
 #include CMSIS_device_header
 #include "fs_camera.h"
@@ -84,6 +87,9 @@ void preprocess_rgb888(const uint8_t* rgb, float* out) {
 struct TopK {
   int top[3];
   float prob[3];
+#ifdef FINGERSPELL_LCD
+  float probabilities[kClasses];  // Feed the existing decoder for the word display.
+#endif
 };
 
 // Runs the model on g_input; softmax + top-3. false (and prints why) on error.
@@ -114,6 +120,9 @@ bool classify(EmbeddedModule& module, TopK* r) {
   for (int i = 1; i < kClasses; ++i) mx = logits[i] > mx ? logits[i] : mx;
   float prob[kClasses], sum = 0.f;
   for (int i = 0; i < kClasses; ++i) sum += (prob[i] = std::exp(logits[i] - mx));
+#ifdef FINGERSPELL_LCD
+  for (int i = 0; i < kClasses; ++i) r->probabilities[i] = prob[i] / sum;
+#endif
   int top[3] = {-1, -1, -1};
   for (int k = 0; k < 3; ++k)
     for (int i = 0; i < kClasses; ++i)
@@ -243,6 +252,11 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
          "npu = forward + softmax)\n");
   uint32_t last = cycles();
   float period_ms = 0.f;
+#ifdef FINGERSPELL_LCD
+  fs_decoder_t decoder;
+  fs_decoder_init(&decoder, nullptr);
+  fs_display_set_frame(g_crop);
+#endif
   for (;;) {
     const uint32_t t0 = cycles();
     uint32_t seq = 0;
@@ -259,6 +273,13 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     TopK r;
     if (!classify(module, &r)) continue;
     const uint32_t t3 = cycles();
+#ifdef FINGERSPELL_LCD
+    // The free-running 32 kHz timer keeps milliseconds monotonic across DWT wraps.
+    const uint32_t now_ms = static_cast<uint32_t>(
+        static_cast<uint64_t>(S32K_CNTRead->CNTCVL) * 1000u / 32768u);
+    const fs_event_t event = fs_decoder_step(&decoder, r.probabilities, now_ms);
+    const uint32_t t4 = cycles();
+#endif
 
     if (g_fs_loop_frames > 0) {  // the first frame has no previous one to time against
       const float dt = cycles_ms(t0 - last);
@@ -269,6 +290,12 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     printf("%c %.2f %c %.2f %c %.2f | cam %.1fms pre %.1fms npu %.1fms | %.1f fps\n", kLabels[r.top[0]],
            r.prob[0], kLabels[r.top[1]], r.prob[1], kLabels[r.top[2]], r.prob[2], cycles_ms(t1 - t0),
            cycles_ms(t2 - t1), cycles_ms(t3 - t2), period_ms > 0.f ? 1000.f / period_ms : 0.f);
+#ifdef FINGERSPELL_LCD
+    const fs_metrics_t metrics = {period_ms > 0.f ? 1000.f / period_ms : 0.f,
+                                 cycles_ms(t1 - t0), cycles_ms(t2 - t1), cycles_ms(t3 - t2),
+                                 cycles_ms(t4 - t3), cycles_ms(t4 - t0)};
+    fs_ui_render(&decoder, &metrics, event);
+#endif
     if (g_fs_dump_request) {
       dump_crop(g_crop, seq);
       g_fs_dump_request = 0;
@@ -301,6 +328,10 @@ extern "C" int app_main(void) {
   printf("Repeat run: %s\n", repeat_ok ? "same top-1" : "FAILED");
   const bool pass = kLabels[r.top[0]] == kTestExpected && repeat_ok;
   printf("Test_result: %s\n", pass ? "PASS" : "FAIL");
+#ifdef FINGERSPELL_LCD
+  if (!fs_display_result(kTestImage, kLabels[r.top[0]], r.prob[0], kTestExpected, pass))
+    printf("LCD unavailable: UART output remains active\n");
+#endif
 
 #ifdef FS_HAVE_CAMERA
   // The camera starts after the self-test, so the test above never shares memory traffic

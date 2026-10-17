@@ -4,14 +4,14 @@
 # Alif Ensemble E8 DevKit board bring-up for the Ethos-U85 NPU, running on the
 # Cortex-M55 high-performance (HP) core. Derived from the pack's
 # Boards/DevKit-e8/Layers/M55_HP/Board_HP-U85.clayer.yml and trimmed to what a
-# headless ExecuTorch inference runner needs: device startup, the Secure
+# ExecuTorch camera/LCD inference runner needs: device startup, the Secure
 # Enclave services (clocks, pin mux), a UART-backed stdout on the PRG USB
 # connector, the Ethos-U driver, and the MT9M114 camera on MIPI CSI-2 (CPI
-# driver behind the vStream VideoIn interface) for live input. Display,
+# driver behind the vStream VideoIn interface) for live input, plus the LCD.
 # Ethernet, USB, VIO and the other vStream drivers are omitted.
 layer:
   type: Board
-  description: DevKit-E8 board setup for headless Ethos-U85 inference on M55_HP
+  description: DevKit-E8 camera and LCD for Ethos-U85 inference on M55_HP
   for-board: Alif Semiconductor::DevKit-E8
   for-device: Alif Semiconductor::AE822FA0E5597LS0:M55_HP
   device: :M55_HP
@@ -31,6 +31,7 @@ layer:
   define:
     - CMSIS_target_header: \"DevKit-E8.h\"
     - ETHOSU85
+    - FINGERSPELL_LCD
     # The runner's memory pools (src/app_main.cpp) do not fit the 1 MB DTCM
     # that the Alif linker scripts use for .bss. Place them in the bulk SRAM
     # at 0x02000000 (NPU-accessible; SRAM0+SRAM1 combined, 8 MB, with the AC6
@@ -63,6 +64,7 @@ layer:
     # RTE_MT9M114_CAMERA_SENSOR_MIPI_IMAGE_CONFIG in RTE_Device.h (5 = 320x320
     # RGB565: square, no Bayer demosaicing on the CPU).
     - component: BSP:External peripherals:CAMERA Sensor MT9M114
+    - component: BSP:External peripherals:ILI9806E LCD panel
 
     - component: CMSIS:CORE
 
@@ -80,6 +82,8 @@ layer:
     - component: Device:SOC Peripherals:GPIO
     - component: Device:SOC Peripherals:MHU
     - component: Device:SOC Peripherals:MIPI CSI2
+    - component: Device:SOC Peripherals:CDC
+    - component: Device:SOC Peripherals:MIPI DSI
     - component: Device:SOC Peripherals:MIPI DSI CSI2 DPHY
     - component: Device:SOC Peripherals:PINCONF
 
