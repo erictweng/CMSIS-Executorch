@@ -111,6 +111,8 @@ SECTIONS
 #if __HAS_BULK_SRAM
     LONG (ADDR(.bss.at_sram0))
     LONG (SIZEOF(.bss.at_sram0)/4)
+    LONG (ADDR(.bss.lcd_frame_buf))
+    LONG (SIZEOF(.bss.lcd_frame_buf)/4)
 #endif
     __zero_table_end__ = .;
     . = ALIGN(16);
@@ -185,10 +187,15 @@ SECTIONS
   {
     *(.bss.ai_pool)                       /* ExecuTorch method/temp pools (src/app_main.cpp) */
     *(.bss.lcd_crop_and_interpolate_buf)  /* LCD crop and intrepolate image processing buffer. */
-    *(.bss.lcd_frame_buf)                 /* LCD frame Buffer. */
     *(.bss.camera_frame_buf)              /* Camer Frame Buffer */
     *(.bss.camera_frame_bayer_to_rgb_buf) /* (Optional) Camera Frame Buffer for Bayer to RGB Conversion. */
   } > SRAM0
+
+  /* Keep the LCD scanout separate from the AI pools and camera ring in SRAM0. */
+  .bss.lcd_frame_buf (NOLOAD) : ALIGN(32)
+  {
+    *(.bss.lcd_frame_buf)
+  } > SRAM1
 #endif
 
   .bss (NOLOAD) : ALIGN(8)

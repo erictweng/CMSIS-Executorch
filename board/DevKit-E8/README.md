@@ -4,8 +4,8 @@ Device: `Alif Semiconductor::AE822FA0E5597LS0:M55_HP` (Cortex-M55 high-performan
 core, 400 MHz) with the Ethos-U85 (256 MACs) of the Ensemble E8.
 
 Derived from the Ensemble pack's `Boards/DevKit-e8/Layers/M55_HP/Board_HP-U85.clayer.yml`
-and trimmed to what a headless inference runner needs. Camera, display,
-Ethernet, USB, VIO and vStream drivers are left out. The target-set in the
+with MT9M114 camera input and ILI9806E LCD output. Ethernet, USB and VIO
+drivers are left out. The target-set in the
 csolution debugs it through the on-board J-Link (`J-Link Server`, SWD at
 4 MHz, `start-pname: M55_HP`).
 
@@ -16,8 +16,46 @@ csolution debugs it through the on-board J-Link (`J-Link Server`, SWD at
 | `retarget_stdio.c` | `stdio_init()` for UART4 through the CMSIS USART driver (115200 8N1) |
 | `ethos_setup.c` | Ethos-U85 driver init at `NPU_HG_BASE`, IRQ 366, prints the NPU banner |
 | `ethosu_cb_dcache.c` | D-cache clean/invalidate hooks for NPU buffers outside the TCMs |
+| `../../src/fs_display.cpp` | LCD power/driver setup and RGB565 photo/text drawing through the UI API |
 | `linker_ac6_mram.sct.src`, `linker_gnu_mram.ld.src` | Pack linker scripts plus a 32 kB stack and the `.bss.ai_pool` section in bulk SRAM |
 | `RTE/` | Configuration files carried with the layer (see below) |
+
+## LCD output
+
+The DevKit-E8 layer enables `FINGERSPELL_LCD` and the ILI9806E/CDC200/MIPI DSI
+drivers. `src/fs_display.cpp` implements `fs_ui_init()` and `fs_ui_render()`
+from `src/fs_api.h`. The LCD uses 480x800 RGB565 (`RTE_CDC200_PIXEL_FORMAT 2`).
+
+At boot it shows the saved test crop, predicted letter, confidence and
+PASS/FAIL. After camera startup, `live_loop()` supplies its existing 128x128
+RGB888 crop, the upstream decoder state and stage timings to the display.
+The live screen shows the crop, current letter/confidence, the last 52 text
+characters, NPU time and loop FPS. Camera capture and inference still run
+continuously; the decoder's existing three-frame commit rule is used.
+
+The LCD module borrows the crop through `fs_display_set_frame()`; keep that
+buffer valid until `fs_ui_render()` returns. It uses the shared decoder types,
+without another decoder implementation. If LCD startup fails, the existing
+top-3 UART stream continues and `fs_ui_render()` prints the text/state fallback.
+
+The GNU script puts the 768000-byte framebuffer in SRAM1 and includes it in
+the startup zero table. SRAM0 keeps the 3 MiB AI pools and 618496-byte camera
+ring/canary. Together those buffers would exceed SRAM0's 4 MiB capacity.
+The AC6 script uses the combined 8 MiB region, or SRAM1 for LCD scanout when
+the regions are configured separately. Display power setup preserves the
+current SE profile and requests both SRAM banks and the MIPI power domains.
+
+This integration needs a board check with both the MT9M114 and LCD attached:
+confirm the boot image/PASS screen, live crop/letters/text, camera error counters,
+render time (the UI contract targets under 10 ms) and reset while streaming.
+Builds and host tests do not verify camera/LCD operation together.
+
+Local validation: GCC 14.3.1 builds passed for DevKit-E8 and the headless
+SSE-320-U85 target. The decoder host suite and five camera source checks
+passed; hardware tests were skipped. The DevKit-E8 ELF places the LCD buffer
+at `0x02400000` in SRAM1, with no overlap with the AI/camera buffers and a
+matching startup zero-table entry. AC6 validation was blocked before source
+compilation because this Mac has no Arm Compiler license configured.
 
 ## Memory layout
 

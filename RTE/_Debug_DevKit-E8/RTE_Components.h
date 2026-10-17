@@ -28,6 +28,8 @@
 #define RTE_ETHOS_U_CORE_DRIVER
 /* AlifSemiconductor::BSP:External peripherals:CAMERA Sensor MT9M114@2.2.0 */
 #define RTE_Drivers_CAMERA_SENSOR_MT9M114            /* Driver CAMERA Sensor */
+/* AlifSemiconductor::BSP:External peripherals:ILI9806E LCD panel@2.2.0 */
+#define RTE_Drivers_MIPI_DSI_ILI9806E_PANEL    /* Driver ILI9806E LCD panel*/
 /* AlifSemiconductor::CMSIS Driver:I2C@2.2.0 */
 #define RTE_Drivers_I2C              /* Driver I2C */
 /* AlifSemiconductor::CMSIS Driver:USART@2.2.0 */
@@ -35,6 +37,8 @@
 /* AlifSemiconductor::CMSIS Driver:vStream:VideoIn&DevKit-E8@1.0.0 */
 #define RTE_VSTREAM_VIDEOIN
 #define RTE_VSTREAM_VIDEOIN_DEVKIT_E8
+/* AlifSemiconductor::Device:SOC Peripherals:CDC@2.2.0 */
+#define RTE_Drivers_CDC200                 /* Driver CDC200*/
 /* AlifSemiconductor::Device:SOC Peripherals:CPI@2.2.0 */
 #define RTE_Drivers_CPI              /* Driver CAMERA Controller */
 /* AlifSemiconductor::Device:SOC Peripherals:DMA@2.2.0 */
@@ -45,6 +49,8 @@
 #define RTE_Drivers_MIPI_CSI2              /* Driver MIPI CSI2 */
 /* AlifSemiconductor::Device:SOC Peripherals:MIPI DSI CSI2 DPHY@2.2.0 */
 #define RTE_Drivers_MIPI_DSI_CSI2_DPHY   /* Driver DPHY */
+/* AlifSemiconductor::Device:SOC Peripherals:MIPI DSI@2.2.0 */
+#define RTE_Drivers_MIPI_DSI               /* Driver MIPI DSI */
 /* AlifSemiconductor::Device:SOC Peripherals:PINCONF@2.2.0 */
 #define RTE_Drivers_LL_PINCONF              /* Driver PinPAD and PinMux */
 /* PyTorch::Machine Learning:ExecuTorch Operators:Quantized dequantize@1.5.1 */
