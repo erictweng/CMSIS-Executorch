@@ -82,7 +82,7 @@ class LayerConfig(unittest.TestCase):
         defines = {k: v for d in layer()["define"] for k, v in (d.items() if isinstance(d, dict) else [(d, None)])}
         self.assertEqual(defines["APP_POOL_SECTION"], '\\".bss.ai_pool\\"')
         self.assertEqual(defines["APP_METHOD_POOL_SIZE"], 0x100000)
-        self.assertEqual(defines["APP_TEMP_POOL_SIZE"], 0x100000)  # 1 MB since the display: all of SRAM0 is shared
+        self.assertEqual(defines["APP_TEMP_POOL_SIZE"], 0x180000)  # 1.5 MB: the landmark method's Vela scratch is 1185 KiB
 
 
 class RteConfig(unittest.TestCase):

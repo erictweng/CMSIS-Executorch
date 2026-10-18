@@ -72,6 +72,7 @@ constexpr uint16_t kMuted = rgb565(151, 175, 199);
 constexpr uint16_t kGrey = rgb565(80, 95, 115);
 constexpr uint16_t kGreen = rgb565(76, 230, 168);
 constexpr uint16_t kRed = rgb565(255, 113, 113);
+constexpr uint16_t kAmber = rgb565(255, 196, 86);  // the hearing person's spoken reply
 
 // ---- layout (pixels) ---------------------------------------------------------------
 constexpr int kTitleY = 8;
@@ -309,15 +310,25 @@ void draw_confidence(char letter, float conf, bool committed_colour) {
   }
 }
 
+// The reply row: once a spoken word has been recognised (fs_display_set_reply), the last row
+// of the words card shows it as "> WORD" in amber and the signer's text keeps three rows.
+char reply_word[16] = {};
+
 // The decoder's text, last kWordsCols * kWordsRows characters, wrapped into the card.
 void draw_words(const char* words, int len, uint16_t color) {
-  const int visible = kWordsCols * kWordsRows;
+  const int rows = reply_word[0] ? kWordsRows - 1 : kWordsRows;
+  const int visible = kWordsCols * rows;
   const char* p = words + (len > visible ? len - visible : 0);
-  for (int row = 0; row < kWordsRows; ++row) {
+  for (int row = 0; row < rows; ++row) {
     char part[kWordsCols + 1] = {};
     int i = 0;
     for (; i < kWordsCols && *p; ++i) part[i] = *p++;
     words_field[row].set(part, color);
+  }
+  if (reply_word[0]) {
+    char line[kWordsCols + 1];
+    std::snprintf(line, sizeof(line), "> %s", reply_word);
+    words_field[kWordsRows - 1].set(line, kAmber);
   }
 }
 
@@ -407,6 +418,12 @@ void fs_display_set_landmarks(const fs_box_t* box, const float xyz[21][3]) {
   landmarks_box[3] = box->y1;
   for (int i = 0; i < 21; ++i)
     for (int c = 0; c < 3; ++c) landmarks_frame[i][c] = xyz[i][c];
+}
+
+void fs_display_set_reply(const char* word) {
+  std::snprintf(reply_word, sizeof(reply_word), "%s", word ? word : "");
+  for (char* c = reply_word; *c; ++c)
+    if (*c >= 'a' && *c <= 'z') *c = static_cast<char>(*c - 'a' + 'A');
 }
 
 void fs_display_set_top3(const char letters[3], const float probs[3]) {

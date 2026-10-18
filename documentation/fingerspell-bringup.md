@@ -240,6 +240,67 @@ letter repeats only after the hand left the frame for `release_ms` (a confidence
 re-arms it); the displayed confidence is the averaged one; `g_fs_tele[1]` is still the raw
 MLP top-1 probability. Host tests: `python3 -m unittest tests.test_decoder_host` (no venv).
 
+## Voice (keyword spotting, branch `voice/kws`)
+
+The hearing person answers the signer out loud: the board's I2S MEMS microphones feed a
+keyword-spotting model on the Ethos-U85 and the word appears as `> YES` on the last row of
+the words card, in amber, while the signer's text keeps three rows. Vocabulary: yes, no, up,
+down, left, right, on, off, stop, go (plus silence and unknown, never shown). Plan and
+findings: `documentation/voice-plan-status.md`; the brief `voice-plan.md`.
+
+```
+I2S3 mic (IRQ, 16 kHz mono)  ->  fs_voice_capture.c ring 1.5 s (DTCM)
+  ->  fs_voice.c MFCC per 20 ms stride (M55)  ->  rolling 49x10 int8 window
+  ->  method "kws" every 0.5 s (DS-CNN small, Ethos-U85)  ->  softmax, threshold 0.7, 1 s refractory
+  ->  "voice: yes 0.91 npu x.xms" on the UART, the reply row on the LCD
+```
+
+- **Model.** Arm ML-Zoo `ds_cnn_small` (Apache-2.0), the MLPerf Tiny DS-CNN: 23.8 k
+  parameters, 2.7 M MACs. No PyTorch checkpoint exists anywhere, so `ml/kws_tflite_to_npz.py`
+  (TensorFlow, tools venv) pulls the trained weights out of the fp32 TFLite file and
+  `ml/kws_export.py` loads them into a PyTorch module that reproduces TF's `SAME` padding
+  (the DS-CNN in `executorch/examples/models/mlperf_tiny` pads one row differently) and
+  saves `model/ds_cnn_kws.pt2`; it matches the TFLite interpreter to 3.5e-6 on the 36
+  reference clips. The `kws` method in `model/model.py` is a8w8 with `quantized_io`
+  (`KWS_INPUT0_*`, `KWS_OUTPUT0_*` in `model_params.h`; the export gave input scale 1.094,
+  zero point 98, like ML-Zoo's own int8 model), calibrated on `model/calib_kws.npy` (100
+  Speech Commands v2 test clips). Strict export: one Ethos-U delegate, no CPU operators,
+  Vela SRAM 23.6 KiB, weights 29.6 KiB; the three-method program is 2,299,024 bytes.
+- **Front end.** `ml/kws.py` (numpy) reproduces TensorFlow's `audio_spectrogram` + `mfcc`
+  as the model was trained: 640-sample periodic Hann every 320, 1024-point FFT, 40 HTK mel
+  channels 20..4000 Hz on the magnitude spectrum, log with a 1e-12 floor, DCT-II scaled by
+  sqrt(2/40), 10 coefficients, no normalisation; it matches TF to 2.5e-5 on 36 clips
+  (`tests/fixtures/kws_ref.npz` holds TF's own output). `src/fs_voice.c` (C99, float
+  radix-2 FFT, tables built at init) matches TF to 1.1e-4 and quantizes identically to the
+  reference in every chunk size. One frame per 20 ms of audio, computed as the samples
+  arrive, so the loop never does a 49-frame burst.
+- **Microphone.** The DevKit-E8 has two I2S MEMS mics (U14/U16) on I2S3 of the HP core,
+  pins already muxed; `src/fs_voice_capture.c` drives `Driver_SAI3` directly in IRQ mode
+  (master, I2S protocol, 16-bit, `ARM_SAI_MONO_MODE`, SCLK 76.8 MHz / 75 = 1.024 MHz after
+  enabling HFOSCx2 through the SE services), one 320-sample `Receive()` re-armed from the
+  callback into a 75-block ring in DTCM (48 KB). Counters `g_fs_voice_*` are readable over
+  J-Link. LPI2S/LPPDM are HE-only; the PDM mics (channels 4/5) are the fallback.
+- **Accuracy of the port with our front end** (`ml/kws_eval.py`, 100 Speech Commands v2
+  test clips per class, host): 89.1 % top-1 float, 88.8 % with the board's int8 input
+  quantization; the ten words score 88-98 %, `_silence_` only 48 % (noise snippets read as
+  down/off/yes). At the 0.7 threshold 5 of 100 noise clips and 14 of 100 unknown-word clips
+  would be accepted as a word; all-zero audio is `silence` at 1.0. Knobs: `kVoiceThreshold`,
+  `kVoiceRefractoryMs` in `app_main.cpp`; a two-consecutive-windows rule is the next step if
+  the room triggers words.
+- **Build.** `APP_VOICE` in the DevKit-E8 layer (remove it for the camera-only build),
+  `CMSIS Driver:SAI` component; `fs_voice.c` builds for every target, `fs_voice_capture.c`
+  for the DevKit only. Image with voice: code 194,016 B, RO 2,429,132 B, ZI 4,804,964 B; MRAM
+  free 973 KB, DTCM free 244 KB, SRAM0 unchanged (118 KB free). Boot prints
+  `Voice self-test: yes 0.xx (expected yes)` and `Voice_test: PASS` (a TF-computed "yes"
+  clip through the kws method; independent of `Test_result`), then
+  `voice capture init OK (I2S3 16 kHz mono 16-bit)`.
+- **Tests.** `tests/test_voice.py`: host (C vs TF and numpy, stream quantization, softmax,
+  decision rule, the pt2 vs the interpreter, the generated parameters) and `FS_HW=1`
+  (capture running, blocks at 50/s, no overruns, frames and inferences advancing, ms per
+  frame and per inference, level not stuck) over J-Link; `tests/voice_check.py` watches the
+  level, the top word and the accepted words live for a person saying the words.
+- **Board numbers:** pending the first flash (see the status file).
+
 ## Next
 
 - S1 camera: capture frames from the DevKit camera, crop the fixed hand box to 128x128

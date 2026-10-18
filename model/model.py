@@ -14,6 +14,11 @@
 #             pixels), presence (1, sigmoid), handedness (1, sigmoid, 1 = right), world
 #             landmarks (63). The keypoint -> letter MLP runs on the CPU (src/fs_landmark.c)
 #             with weights from get_params() (model/keypoint_mlp.npz).
+#   kws       DS-CNN "small" keyword spotting (Arm ML-Zoo weights, Apache-2.0; ml/kws_export.py ->
+#             model/ds_cnn_kws.pt2). Input 1x49x10x1 NHWC float: 49 frames of 10 MFCCs over 1 s
+#             of 16 kHz audio (ml/kws.py, src/fs_voice.c); on the board int8 (quantized_io).
+#             Output 12 logits: silence, unknown, yes, no, up, down, left, right, on, off, stop,
+#             go; softmax on the CPU. documentation/voice-plan-status.md.
 #   (classify, the MobileNetV2-0.5 pixel classifier of branch detect/blazepalm, is gone:
 #    documentation/landmark-plan.md.)
 #
@@ -36,6 +41,8 @@ from torch import nn
 HERE = Path(__file__).resolve().parent
 DETECT_SHAPE = (1, 192, 192, 3)
 LANDMARK_SHAPE = (1, 224, 224, 3)
+KWS_SHAPE = (1, 49, 10, 1)  # frames x MFCC coefficients, time-major
+KWS_LABELS = "silence,unknown,yes,no,up,down,left,right,on,off,stop,go"
 CLASSIFY_SHAPE = (1, 128, 128, 3)  # the retired pixel classifier (get_model(), for old tools)
 DETECT_ANCHORS, DETECT_COORDS = 2016, 18
 LANDMARKS = 21
@@ -84,6 +91,13 @@ def calib_landmark(samples: int = 100) -> Iterable[tuple[torch.Tensor, ...]]:
     return [(torch.from_numpy(data[i : i + 1]).float().div(255),) for i in range(n)]
 
 
+def calib_kws(samples: int = 100) -> Iterable[tuple[torch.Tensor, ...]]:
+    """MFCCs of Speech Commands clips (model/calib_kws.npy, N x 49 x 10 float32, ml/kws_export.py)."""
+    data = np.load(HERE / "calib_kws.npy")
+    n = min(samples, len(data))
+    return [(torch.from_numpy(data[i : i + 1]).float().unsqueeze(-1),) for i in range(n)]
+
+
 def calib_classify(samples: int = 300) -> Iterable[tuple[torch.Tensor, ...]]:
     """Real preprocessed training crops (float [0,1], NHWC), saved by ml/export.py."""
     data = np.load(HERE / "calib_128.npy")  # N x 128 x 128 x 3 uint8
@@ -112,6 +126,11 @@ def get_methods(**params) -> list[Method]:
                lambda: calib_detect(min(calibration_samples, 100)), "a8w8", quantized_io=True),
         Method("landmark", _load("hand_landmark_224.pt2"), (torch.zeros(LANDMARK_SHAPE),),
                lambda: calib_landmark(min(calibration_samples, 100)), "a8w8", quantized_io=True),
+        # Keyword spotting (voice reply): tiny, runs every 0.5 s from the same loop. The int8
+        # input scale/zero point land in model_params.h as KWS_INPUT0_*; the firmware quantizes
+        # its MFCCs with them (ML-Zoo's own int8 model used 1.084 / 100 for the same features).
+        Method("kws", _load("ds_cnn_kws.pt2"), (torch.zeros(KWS_SHAPE),),
+               lambda: calib_kws(min(calibration_samples, 100)), "a8w8", quantized_io=True),
     ]
 
 
@@ -135,6 +154,10 @@ def get_params() -> dict:
         "FS_MLP_B1": mlp["b1"],
         "FS_MLP_W2": mlp["W2"],
         "FS_MLP_B2": mlp["b2"],
+        "FS_VOICE_FRAMES": KWS_SHAPE[1],
+        "FS_VOICE_COEFFS": KWS_SHAPE[2],
+        "FS_VOICE_CLASSES": len(KWS_LABELS.split(",")),
+        "FS_VOICE_LABELS": KWS_LABELS,
     }
 
 

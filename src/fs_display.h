@@ -23,4 +23,7 @@ void fs_display_set_detection(const uint16_t* frame565, bool hand, bool fresh, f
 // crop view shows (the skeleton is drawn on the crop view through that box and as dots on
 // the inset); NULL = none.
 void fs_display_set_landmarks(const fs_box_t* box, const float xyz[21][3]);
+// The hearing person's last spoken reply (keyword spotting), shown as "> WORD" on the last row
+// of the words card from the next fs_ui_render() on; NULL or "" removes the row.
+void fs_display_set_reply(const char* word);
 #endif

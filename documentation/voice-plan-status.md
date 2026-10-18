@@ -312,3 +312,29 @@ Do not claim it as a feature.
 2. Confirmation that the I2S mics are the ones to use (or a preference for the PDM pair).
 3. Whether "stop"/"go" should control the decoder, or words are display-only.
 4. The UART: a working serial port (or an agreed J-Link-only test protocol) before phase 1.
+
+## 9. Status log
+
+- 2026-10-18 15:30: go-ahead (PR #11 merged). Durable worktree `/Users/ericweng/CMSIS-Executorch-voice`
+  on `voice/kws` (rebased onto `fingerspell` at `3f123170`).
+- 2026-10-18 16:00: **phases 0-2 done on the host, phases 1 and 3 built, nothing flashed.**
+  Weights: Arm ML-Zoo `ds_cnn_small` fp32 TFLite (LFS files, fetched through
+  `github.com/.../raw/...`), extracted with `ml/kws_tflite_to_npz.py` (tools venv) and ported by
+  `ml/kws_export.py`: matches the TFLite interpreter to 3.5e-6 (36 clips, 36/36 top-1).
+  Front end: `ml/kws.py` matches TensorFlow's `audio_spectrogram` + `mfcc` to 2.5e-5 (the
+  filterbank takes the magnitude, not the power, and the mel scale is HTK: both confirmed
+  numerically); `src/fs_voice.c` matches TF to 1.1e-4 and the stream quantizes bit-exactly
+  against the reference for chunk sizes 320, 333, 1600 and 16000. Gate 0 (strict export):
+  `kws` is one Ethos-U delegate, no CPU operators, Vela SRAM 23.6 KiB, weights 29.6 KiB, input
+  scale 1.094 / zero point 98, output scale 0.234 / zero point 46; program 2,299,024 bytes.
+  Mic capture written against `Driver_SAI3` (IRQ, mono, 16-bit, HFOSCx2 enabled through the
+  SE services), ring 48 KB in DTCM. Integration: `voice_poll()` once per loop iteration after
+  the stage timers, inference every 25 new frames, `voice: rms ..` every 0.5 s,
+  `voice: <word> <score> npu <ms>` on acceptance, reply row on the LCD, `g_fs_voice_tele[11]`,
+  boot `Voice_test: PASS` on a TF-computed "yes" clip. DevKit image builds: code 194,016 B,
+  RO 2,429,132 B, ZI 4,804,964 B (MRAM free 973 KB, DTCM free 244 KB, SRAM0 118 KB).
+  Host accuracy of the port (1200 Speech Commands test clips): 89.1 % float, 88.8 % with the
+  int8 input; silence 48 %, so a noisy room may trigger words (5 % of noise clips pass 0.7).
+  Host tests: `tests/test_voice.py` 10 host tests green. **Pending the board** (another agent
+  holds it): phase 1 level check, mfcc ms per frame, NPU ms per inference, fps before/after,
+  the four words spoken, false triggers in 60 s of room noise, `FS_HW=1` suites.

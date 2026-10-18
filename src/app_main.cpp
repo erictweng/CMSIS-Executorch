@@ -46,6 +46,12 @@
 #include "sys_utils.h"   // sys_busy_loop_init_ns
 #define FS_HAVE_CAMERA 1
 #endif
+#if defined(APP_VOICE) && defined(FS_HAVE_CAMERA)  // the DevKit-E8 microphones: spoken replies (keyword spotting)
+#include "fs_voice.h"
+#include "fs_voice_capture.h"
+#include "test_voice.h"  // kTestVoiceMfcc[490], kTestVoiceExpected
+#define FS_HAVE_VOICE 1
+#endif
 
 using arm::embedded::EmbeddedModule;
 using executorch::aten::DimOrderType;
@@ -62,6 +68,10 @@ using executorch::runtime::MemoryAllocator;
 extern "C" {
 volatile uint32_t g_fs_dump_request = 0;
 volatile uint32_t g_fs_loop_frames = 0;  // live-loop iterations (frames through the detector)
+// Voice telemetry (tests/test_voice.py): 0 capture running 1 blocks received 2 overruns
+// 3 rms of the last 0.5 s 4 MFCC frames pushed 5 inferences 6 last word class (0 = none yet)
+// 7 last top score x1000 8 NPU ms x1000 9 MFCC ms per frame x1000 10 words reported
+volatile uint32_t g_fs_voice_tele[11] = {0};
 // Per-frame telemetry for the debugger (tests/fs_tools.py read_word): the UART is not always
 // available. Letters as ASCII codes, probabilities and times x1000, path in 1/1000 hand sizes.
 volatile uint32_t g_fs_tele[17] = {0};  // 0 letter 1 prob 2 presence 3 fps 4 det_ms 5 lm_ms 6 box_x 7 box_y 8 box_w
@@ -152,8 +162,9 @@ struct MethodInput {
   std::array<SizesType, 4> sizes;
   std::array<DimOrderType, 4> dim_order;
   TensorImpl impl;
-  MethodInput(int side, void* data)
-      : sizes{1, side, side, 3}, dim_order{0, 1, 2, 3},
+  MethodInput(int side, void* data) : MethodInput({1, side, side, 3}, data) {}
+  MethodInput(std::array<SizesType, 4> s, void* data)
+      : sizes(s), dim_order{0, 1, 2, 3},
         impl(ScalarType::Char, sizes.size(), sizes.data(), data, dim_order.data()) {}
   bool set(EmbeddedModule& module, const char* method) {
     Tensor tensor(&impl);
@@ -334,6 +345,128 @@ void test_frame(const uint8_t* rgb, uint16_t* frame) {
           static_cast<uint16_t>(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
     }
 }
+
+#ifdef FS_HAVE_VOICE
+// ---- voice: spoken replies through keyword spotting ----------------------------------
+// The mic ring (fs_voice_capture.c, filled from the I2S interrupt) is drained once per camera
+// frame into the MFCC stream (fs_voice.c); every kVoiceInferFrames new frames (0.5 s) the last
+// second of features goes through the "kws" method and the decision rule. The NPU is only ever
+// called from the loop, so this never collides with detect / landmark.
+constexpr int kVoiceInferFrames = 25;  // 0.5 s between inferences
+constexpr float kVoiceThreshold = 0.7f;
+constexpr uint32_t kVoiceRefractoryMs = 1000;
+constexpr fs_voice_quant_t kKwsInput = {KWS_INPUT0_SCALE, KWS_INPUT0_ZERO_POINT};
+constexpr fs_voice_quant_t kKwsOutput = {KWS_OUTPUT0_SCALE, KWS_OUTPUT0_ZERO_POINT};
+static_assert(KWS_INPUT0_SIZE == FS_VOICE_INPUT && KWS_OUTPUT0_SIZE == FS_VOICE_CLASSES, "kws method vs fs_voice.h");
+alignas(16) int8_t g_kws_input[FS_VOICE_INPUT];
+fs_voice_stream_t g_voice_stream;
+fs_voice_decider_t g_voice_decider;
+bool g_voice_on = false;
+uint32_t g_voice_infer_frames = 0;  // g_voice_stream.frames at the last inference
+double g_voice_sumsq = 0.0;         // for the level print: sum of squares since the last inference
+uint32_t g_voice_nsamp = 0;
+float g_voice_mfcc_ms = 0.f;        // smoothed ms per MFCC frame
+
+bool kws(EmbeddedModule& module, float probs[FS_VOICE_CLASSES]) {
+  static MethodInput input({1, FS_VOICE_FRAMES, FS_VOICE_COEFFS, 1}, g_kws_input);
+  Outputs o;
+  if (!run(module, "kws", input, &o)) return false;
+  if (o.count < 1 || o.numel[0] != FS_VOICE_CLASSES) {
+    printf("kws: unexpected outputs (%d tensors)\n", o.count);
+    return false;
+  }
+  fs_voice_softmax(o.data[0], kKwsOutput, probs);
+  return true;
+}
+
+int argmax(const float* v, int n) {
+  int k = 0;
+  for (int i = 1; i < n; ++i)
+    if (v[i] > v[k]) k = i;
+  return k;
+}
+
+// Boot self-test of the kws method: a Speech Commands "yes" clip's MFCCs (test_voice.h) must
+// come back as "yes". Prints Voice_test: PASS / FAIL; the camera demo does not depend on it.
+bool voice_self_test(EmbeddedModule& module) {
+  for (int i = 0; i < FS_VOICE_INPUT; ++i) {
+    const float x = kTestVoiceMfcc[i] / kKwsInput.scale + static_cast<float>(kKwsInput.zero_point);
+    const int q = static_cast<int>(x >= 0.f ? x + 0.5f : x - 0.5f);
+    g_kws_input[i] = static_cast<int8_t>(q < -128 ? -128 : q > 127 ? 127 : q);
+  }
+  float probs[FS_VOICE_CLASSES];
+  if (!kws(module, probs)) return false;
+  const int top = argmax(probs, FS_VOICE_CLASSES);
+  const bool pass = strcmp(fs_voice_labels[top], kTestVoiceExpected) == 0;
+  printf("Voice self-test: %s %.2f (expected %s)\nVoice_test: %s\n", fs_voice_labels[top], probs[top],
+         kTestVoiceExpected, pass ? "PASS" : "FAIL");
+  return pass;
+}
+
+void voice_init() {
+  fs_voice_mfcc_init();
+  fs_voice_stream_reset(&g_voice_stream, kKwsInput);
+  fs_voice_decider_init(&g_voice_decider, kVoiceThreshold, kVoiceRefractoryMs);
+  g_voice_on = fs_voice_capture_init();
+}
+
+// The free-running 32 kHz timer: milliseconds that stay monotonic across REFCLK wraps.
+inline uint32_t monotonic_ms() {
+  return static_cast<uint32_t>(static_cast<uint64_t>(S32K_CNTRead->CNTCVL) * 1000u / 32768u);
+}
+
+// Once per camera frame, after the stage timers: drain the mic, compute the new MFCC frames,
+// and every 0.5 s run the model and report. Prints "voice: rms .." every 0.5 s and
+// "voice: <word> <score> npu <ms>" when a word is accepted.
+void voice_poll(EmbeddedModule& module) {
+  if (!g_voice_on) return;
+  int16_t chunk[4 * FS_VOICE_STRIDE];
+  uint32_t n;
+  while ((n = fs_voice_capture_read(chunk, sizeof chunk / sizeof chunk[0])) > 0) {
+    for (uint32_t i = 0; i < n; ++i) g_voice_sumsq += static_cast<double>(chunk[i]) * chunk[i];
+    g_voice_nsamp += n;
+    const uint32_t t0 = cycles();
+    const int frames = fs_voice_stream_push(&g_voice_stream, chunk, static_cast<int>(n));
+    if (frames > 0) {
+      const float ms = cycles_ms(cycles() - t0) / static_cast<float>(frames);
+      g_voice_mfcc_ms = g_voice_mfcc_ms == 0.f ? ms : 0.9f * g_voice_mfcc_ms + 0.1f * ms;
+    }
+  }
+  g_fs_voice_tele[0] = g_fs_voice_running;
+  g_fs_voice_tele[1] = g_fs_voice_blocks;
+  g_fs_voice_tele[2] = g_fs_voice_overruns;
+  g_fs_voice_tele[4] = g_voice_stream.frames;
+  g_fs_voice_tele[9] = static_cast<uint32_t>(g_voice_mfcc_ms * 1000.f);
+  if (g_voice_stream.frames - g_voice_infer_frames < static_cast<uint32_t>(kVoiceInferFrames) ||
+      !fs_voice_stream_full(&g_voice_stream))
+    return;
+  g_voice_infer_frames = g_voice_stream.frames;
+  const float rms = g_voice_nsamp ? static_cast<float>(sqrt(g_voice_sumsq / g_voice_nsamp)) : 0.f;
+  g_voice_sumsq = 0.0;
+  g_voice_nsamp = 0;
+  fs_voice_stream_input(&g_voice_stream, g_kws_input);
+  float probs[FS_VOICE_CLASSES];
+  const uint32_t t0 = cycles();
+  if (!kws(module, probs)) return;
+  const float npu_ms = cycles_ms(cycles() - t0);
+  const int top = argmax(probs, FS_VOICE_CLASSES);
+  const int word = fs_voice_decide(&g_voice_decider, probs, monotonic_ms());
+  g_fs_voice_tele[3] = static_cast<uint32_t>(rms);
+  g_fs_voice_tele[5]++;
+  g_fs_voice_tele[7] = static_cast<uint32_t>(probs[top] * 1000.f);
+  g_fs_voice_tele[8] = static_cast<uint32_t>(npu_ms * 1000.f);
+  if (word >= 0) {
+    g_fs_voice_tele[6] = static_cast<uint32_t>(word);
+    g_fs_voice_tele[10]++;
+    printf("voice: %s %.2f npu %.1fms\n", fs_voice_labels[word], probs[word], npu_ms);
+#ifdef FINGERSPELL_LCD
+    fs_display_set_reply(fs_voice_labels[word]);
+#endif
+  }
+  printf("voice: rms %.0f top %s %.2f npu %.1fms mfcc %.2fms/frame\n", rms, fs_voice_labels[top], probs[top], npu_ms,
+         g_voice_mfcc_ms);
+}
+#endif  // FS_HAVE_VOICE
 
 #ifdef FS_HAVE_CAMERA
 
@@ -569,6 +702,9 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     else
       printf("no hand | det %.1fms | %.1f fps\n", det_ms, fps);
 #endif
+#ifdef FS_HAVE_VOICE
+    voice_poll(module);  // outside the stage timers; its cost shows in the fps and in g_fs_voice_tele
+#endif
     if (g_fs_dump_request) {
       dump_crop(g_crop, seq);  // the last landmark crop's preview (stale while there is no hand)
       g_fs_dump_request = 0;
@@ -627,6 +763,10 @@ extern "C" int app_main(void) {
   // with the CPI's DMA. Prints "camera init OK 320x320 RGB565" or the stage that failed.
   cycles_init();
   const bool camera = fs_camera_init();
+#ifdef FS_HAVE_VOICE
+  voice_self_test(module);
+  voice_init();  // after the camera: a failed mic bring-up is the last line printed and costs nothing else
+#endif
   if (camera) {
     printf("core clock %lu Hz\n", static_cast<unsigned long>(SystemCoreClock));
     camera_probe(3000);                         // step 4: frames

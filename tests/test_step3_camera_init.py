@@ -107,7 +107,7 @@ class Build(unittest.TestCase):
     def test_frame_ring_does_not_overlap_the_model_memory(self):
         a = self.syms["s_ring"]
         # The pools are in an anonymous namespace: match the mangled names.
-        for other in ("g_method_pool", "g_temp_pool", "g_input"):
+        for other in ("g_method_pool", "g_temp_pool", "g_detect_input", "g_landmark_input"):
             b = next(v for k, v in self.syms.items() if k == other or k.endswith(f"{len(other)}{other}E"))
             self.assertTrue(a[0] + a[1] <= b[0] or b[0] + b[1] <= a[0], f"frame ring overlaps {other}")
 

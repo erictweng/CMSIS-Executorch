@@ -39,6 +39,16 @@ project:
         - file: ./src/fs_camera.c
           for-context: +DevKit-E8
         - file: ./src/fs_camera.h
+        # The I2S microphones (Driver_SAI3) are only in the DevKit-E8 board layer: a 1.5 s
+        # ring of 16 kHz mono samples filled from the I2S IRQ, drained by the voice stage.
+        # The keyword-spotting front end (MFCC, rolling window, softmax, decision rule) is
+        # pure C99 for every target; host tests in tests/host/test_fs_voice.c.
+        - file: ./src/fs_voice.c
+          optimize: speed  # one 1024-point FFT per 20 ms of audio
+        - file: ./src/fs_voice.h
+        - file: ./src/fs_voice_capture.c
+          for-context: +DevKit-E8
+        - file: ./src/fs_voice_capture.h
         # Palm detector CPU side (resize, anchors, decode, box rule, tracking, crop). Pure
         # C99, every target; host tests in tests/host/test_fs_detect.c.
         - file: ./src/fs_detect.c

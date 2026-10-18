@@ -32,6 +32,10 @@ layer:
     - CMSIS_target_header: \"DevKit-E8.h\"
     - ETHOSU85
     - FINGERSPELL_LCD
+    # Voice replies: the I2S mics -> MFCC on the M55 -> the "kws" method on the NPU -> a
+    # reply row on the LCD (src/fs_voice*.c, documentation/voice-plan-status.md). Remove
+    # this define to ship the camera-only build.
+    - APP_VOICE
     # The runner's memory pools (src/app_main.cpp) do not fit the 1 MB DTCM
     # that the Alif linker scripts use for .bss. Place them in the bulk SRAM0
     # (4 MB at 0x02000000, the only bulk SRAM the Ethos-U85 can reach; the
@@ -69,6 +73,11 @@ layer:
     - component: CMSIS:CORE
 
     - component: CMSIS Driver:I2C
+    # Microphones: the two I2S MEMS mics on I2S3 (Driver_SAI3, IRQ mode, mono 16 kHz
+    # 16-bit, src/fs_voice_capture.c). Driven directly, not through vStream AudioIn,
+    # which defaults to the HE-only LPI2S and receives stereo. Requires the DMA
+    # component below even in IRQ mode (pack condition).
+    - component: CMSIS Driver:SAI
     - component: CMSIS Driver:USART
     - component: CMSIS Driver:vStream:VideoIn&DevKit-E8
 
