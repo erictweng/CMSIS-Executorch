@@ -2,8 +2,9 @@
 // Fingerspell on the DevKit-E8 LCD (ILI9806E, 480x800 portrait, RGB565 via the CDC200).
 //
 // The UI half of fs_api.h: fs_ui_init() brings the panel up, fs_ui_render() draws one frame.
-// Layout, top to bottom: title, the 128x128 camera crop the model sees scaled 3x (384x384)
-// in a 1 px frame, the live letter in big type with its confidence as a percentage and a
+// Layout, top to bottom: title, the 128x128 hand crop the classifier sees scaled 3x (384x384)
+// in a 1 px frame with an 80x80 inset of the whole camera frame and the detected hand box in
+// its top-right corner, the live letter in big type with its confidence as a percentage and a
 // bar (green from the decoder's commit threshold up, grey below), the 2nd/3rd guesses, the
 // stage timings and fps, and the text the decoder has committed.
 //
@@ -14,6 +15,7 @@
 #include "fs_display.h"
 
 #if defined(FINGERSPELL_LCD)
+#include "fs_detect.h"  // FS_DET_FRAME
 #include <cstdio>
 #include <cstring>
 
@@ -49,6 +51,9 @@ bool fallback_announced;
 const uint8_t* preview;
 char top3_letters[3];
 float top3_probs[3];
+const uint16_t* detection_frame;
+bool detection_hand, detection_fresh;
+float detection_box[4];
 
 constexpr uint16_t rgb565(unsigned r, unsigned g, unsigned b) {
   return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
@@ -67,6 +72,9 @@ constexpr int kCropScale = 3;
 constexpr int kCropSize = FS_SIZE * kCropScale;             // 384
 constexpr int kCropX = (kWidth - kCropSize) / 2;            // 48
 constexpr int kCropY = 44;
+// The frame inset: the 320x320 camera frame subsampled 4x in the crop view's top-right.
+constexpr int kInsetSize = 80, kInsetStep = 320 / kInsetSize;
+constexpr int kInsetX = kCropX + kCropSize - kInsetSize - 4, kInsetY = kCropY + 4;
 constexpr int kLetterX = 48, kLetterY = 448, kLetterScale = 12;  // 60 x 84 px
 constexpr int kPercentX = 132, kPercentY = 452, kPercentScale = 5;
 constexpr int kBarX = 132, kBarY = 497, kBarW = 300, kBarH = 24;
@@ -221,6 +229,30 @@ void blit_crop(const uint8_t* rgb) {
   mark_rows(kCropY, kCropY + kCropSize - 1);
 }
 
+// The frame inset (RGB565 frame pixels copy straight into the frame buffer) with its 1 px
+// frame, and the hand box scaled onto it; drawn over the crop view, inside its rows.
+void blit_inset() {
+  if (!detection_frame) return;
+  const uint16_t edge = detection_hand ? kMuted : kRed;
+  rect(kInsetX - 1, kInsetY - 1, kInsetSize + 2, kInsetSize + 2, edge);
+  for (int y = 0; y < kInsetSize; ++y) {
+    const uint16_t* src = detection_frame + (y * kInsetStep) * FS_DET_FRAME;
+    uint16_t* dst = framebuffer + (kInsetY + y) * kWidth + kInsetX;
+    for (int x = 0; x < kInsetSize; ++x) dst[x] = src[x * kInsetStep];
+  }
+  if (!detection_hand) return;
+  int b[4];
+  for (int i = 0; i < 4; ++i) {
+    int v = static_cast<int>(detection_box[i] / kInsetStep);
+    b[i] = v < 0 ? 0 : v > kInsetSize - 1 ? kInsetSize - 1 : v;
+  }
+  const uint16_t color = detection_fresh ? kGreen : kMuted;
+  rect(kInsetX + b[0], kInsetY + b[1], b[2] - b[0] + 1, 1, color);
+  rect(kInsetX + b[0], kInsetY + b[3], b[2] - b[0] + 1, 1, color);
+  rect(kInsetX + b[0], kInsetY + b[1], 1, b[3] - b[1] + 1, color);
+  rect(kInsetX + b[2], kInsetY + b[1], 1, b[3] - b[1] + 1, color);
+}
+
 void draw_confidence(char letter, float conf, bool committed_colour) {
   const char s[2] = {letter ? letter : '-', '\0'};
   letter_field.set(s, letter ? (committed_colour ? kGreen : kWhite) : kMuted);
@@ -316,6 +348,17 @@ bool fs_display_result(const uint8_t* rgb, char predicted, float confidence,
 
 void fs_display_set_frame(const uint8_t* rgb) { preview = rgb; }
 
+void fs_display_set_detection(const uint16_t* frame565, bool hand, bool fresh, float x0, float y0, float x1,
+                              float y1) {
+  detection_frame = frame565;
+  detection_hand = hand;
+  detection_fresh = fresh;
+  detection_box[0] = x0;
+  detection_box[1] = y0;
+  detection_box[2] = x1;
+  detection_box[3] = y1;
+}
+
 void fs_display_set_top3(const char letters[3], const float probs[3]) {
   for (int i = 0; i < 3; ++i) {
     top3_letters[i] = letters[i];
@@ -343,6 +386,7 @@ void fs_ui_render(const fs_decoder_t* d, const fs_metrics_t* m, fs_event_t last_
     display_errors = 0;
   }
   if (preview) blit_crop(preview);
+  blit_inset();
 
   // The model's top letter and its probability, green once the decoder holds it above
   // its commit threshold (d->live), white below.

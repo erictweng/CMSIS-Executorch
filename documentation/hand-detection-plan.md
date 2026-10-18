@@ -37,7 +37,9 @@ Input: one 320x320 RGB565 frame from the CPI ring (`fs_camera_latest_frame()`, a
 1. Convert RGB565 -> RGB888 (`rgb565_to_888` in `src/fs_camera.c`).
 2. Resize 320x320 -> 192x192 with area averaging (box filter). The frame is square, so no
    letterboxing. Keep the scale factor 320/192 to map boxes back.
-3. Normalise to float in [-1, 1]: `x / 127.5 - 1` (BlazePalm's contract). For the int8 build
+3. Normalise to float in [0, 1]: `x / 255` (the contract of the 192x192 palm models:
+   MediaPipe's `palm_detection_cpu.pbtxt` sets `output_tensor_float_range 0..1`; the
+   `[-1, 1]` range of the 2019 256x256 model puts the boxes off the hands). For the int8 build
    this folds into the quantizer's input scale/zero-point; on the board it is one quantize op.
 4. Layout: NHWC 1x192x192x3 (the TFLite/TOSA graph's layout; this repo's export flow is NHWC).
 5. Run the detector. Output: 2016 anchors x (score, cx, cy, w, h, 7 keypoints).

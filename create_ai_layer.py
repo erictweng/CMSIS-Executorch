@@ -85,7 +85,12 @@ class Method:
 
     calibration yields input tuples for the quantizer's observers; without it
     the example inputs are used. quantization is "a8w8" (int8 activations and
-    weights) or "a16w8" (int16 activations, int8 weights).
+    weights) or "a16w8" (int16 activations, int8 weights). quantized_io drops the
+    quantize/dequantize operators at the method's boundary: the method then takes
+    and returns the integer tensors directly (no per-element CPU work in the
+    runtime) and model_params.h gets <METHOD>_INPUT<i>_SCALE / _ZERO_POINT /
+    _SIZE and <METHOD>_OUTPUT<i>_SCALE / _ZERO_POINT / _SIZE for the application
+    to convert (ExecuTorch's quantize_io_pass).
     """
 
     name: str
@@ -93,6 +98,7 @@ class Method:
     example_inputs: tuple
     calibration: Callable[[], Iterable[tuple]] | None = None
     quantization: str = "a8w8"
+    quantized_io: bool = False
 
 
 def run_in_venv() -> None:
@@ -385,16 +391,40 @@ def report_partitioning(edge, name: str) -> set[str]:
     return set(cpu_ops)
 
 
-def export_model(spec, model, params: dict | None = None) -> tuple[bytes, set[str]]:
-    """Quantize, delegate and serialize every method; return the .pte and the CPU operators."""
+def quantize_io(program, method: Method) -> dict[str, Any]:
+    """Make the method take and return the quantized tensors; the parameters for model_params.h."""
+    from executorch.exir.passes.quantize_io_pass import quantize_input, quantize_output
+
+    prefix = re.sub(r"\W", "_", method.name).upper()
+    io_params: dict[str, Any] = {}
+    outputs = list(program.graph.output_node().args[0])
+    for kind, count, rewrite in (("INPUT", len(program.graph_signature.user_inputs), quantize_input),
+                                 ("OUTPUT", len(outputs), quantize_output)):
+        for i in range(count):
+            scale, zero_point, _qmin, _qmax, dtype = rewrite(program, i)
+            node = outputs[i] if kind == "OUTPUT" else None
+            size = int(node.meta["val"].numel()) if node is not None else int(method.example_inputs[i].numel())
+            io_params[f"{prefix}_{kind}{i}_SCALE"] = float(scale)
+            io_params[f"{prefix}_{kind}{i}_ZERO_POINT"] = int(zero_point)
+            io_params[f"{prefix}_{kind}{i}_SIZE"] = size
+            print(f"[ai_layer] {method.name}: {kind.lower()} {i} is {dtype} x {size}, scale {float(scale):.6g}, zero point {int(zero_point)}")
+    return io_params
+
+
+def export_model(spec, model, params: dict | None = None) -> tuple[bytes, set[str], dict[str, Any]]:
+    """Quantize, delegate and serialize every method; return the .pte, the CPU operators and
+    the quantized-IO parameters for model_params.h."""
     import torch
     from executorch.backends.arm.ethosu import EthosUPartitioner
     from executorch.exir import EdgeCompileConfig, ExecutorchBackendConfig, to_edge_transform_and_lower
 
     programs = {}
+    io_params: dict[str, Any] = {}
     for method in methods(model, params):
         print(f"[ai_layer] {method.name}: quantization {method.quantization}")
         programs[method.name] = torch.export.export(quantize_method(method, spec), method.example_inputs)
+        if method.quantized_io:
+            io_params.update(quantize_io(programs[method.name], method))
 
     edge = to_edge_transform_and_lower(
         programs,
@@ -408,7 +438,7 @@ def export_model(spec, model, params: dict | None = None) -> tuple[bytes, set[st
     program = edge.to_executorch(ExecutorchBackendConfig(extract_delegate_segments=False))
     for name in programs:  # operators to_executorch adds (copies, for example) need components too
         cpu_ops |= set(count_ops(program.exported_program(name).graph_module)[1])
-    return bytes(program.buffer), cpu_ops
+    return bytes(program.buffer), cpu_ops, io_params
 
 
 # ----------------------------------------------------------------------------
@@ -576,7 +606,7 @@ def main() -> None:
     layer_dir = layer_file.parent
 
     model = load_model_module()
-    pte, cpu_ops = export_model(compile_spec(mlops, mlops_file.parent), model, model_params(mlops))
+    pte, cpu_ops, io_params = export_model(compile_spec(mlops, mlops_file.parent), model, model_params(mlops))
     version = executorch_version(mlops_file)
     runtime, operators = components(pte, executorch_pack(version), cpu_ops)
 
@@ -586,8 +616,9 @@ def main() -> None:
     (layer_dir / DATA).write_text(c_rows(pte), newline="\n")
     (layer_dir / f"{SYMBOL}.c").write_text(SOURCE, newline="\n")
     (layer_dir / f"{SYMBOL}.h").write_text(HEADER, newline="\n")
-    if hasattr(model, "get_params"):
-        (layer_dir / PARAMS_HEADER).write_text(params_header(model.get_params()), newline="\n")
+    params = {**(model.get_params() if hasattr(model, "get_params") else {}), **io_params}
+    if params:
+        (layer_dir / PARAMS_HEADER).write_text(params_header(params), newline="\n")
         files.append(PARAMS_HEADER)
     layer_file.write_text(clayer(mlops, runtime, operators, mlops_file, version, files), newline="\n")
 

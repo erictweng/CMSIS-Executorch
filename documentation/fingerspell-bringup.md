@@ -115,6 +115,61 @@ own printed `0.0ms`. Tests: `tests/test_display.py` (`FS_HW=1` flashes and check
 panel message, the `ui` time < 10 ms at >= 15 fps, the frame buffer changing with
 the camera, and a warm reset).
 
+## Detector (BlazePalm on the Ethos-U85)
+
+The hand no longer has to sit in the centre box: a palm detector finds it anywhere in the
+320x320 frame and the classifier gets the detected hand box. Plan and design:
+`documentation/hand-detection-plan.md`.
+
+**Model.** MediaPipe `palm_detection_lite.tflite` (192x192, 290 M MACs), converted with
+`ml/blazepalm_export.py` (TFLite -> ONNX -> onnx2torch -> fixed-shape graph) to
+`model/blazepalm_192.pt2`; it matches the TFLite interpreter to 1e-4 on the score logits.
+**Input range is [0, 1]** (`x / 255`): MediaPipe's graph for the 192 models sets
+`output_tensor_float_range 0..1`. With the 2019 model's `[-1, 1]` range the detector fired on
+31 % of 150 dataset images and put the palm centre inside the hand in 23 % of 150 composites;
+with `[0, 1]` it fires on 76 % and 83 % with the centre inside the hand 98 % of the time.
+Quantized on 100 dataset crops, against the float model on the same 300 images:
+
+| | hit/miss agreement | mean score diff | box corners (192 px) | Vela SRAM |
+|---|---|---|---|---|
+| a8w8 | 274/300 | 0.04 | 2.5 px median, 5.6 px p90 | 886 KiB |
+| a16w8 | 293/300 | 0.01 | 0.7 px median, 1.8 px p90 | 2306 KiB |
+
+`model/model.py` uses a8w8 (the 1 MB temp pool holds its scratch). The two-method program
+(`detect` + `classify`, both single Ethos-U delegates) needs the HP MRAM region extended to
+`0x370000` (`board/DevKit-E8/RTE/Device/.../app_mem_regions.h`, same change on the AppKit-E8;
+the user region shrinks to 32 kB). `detect` is exported with `quantized_io=True`: the method
+takes the int8 tensor and returns the int8 head, and `create_ai_layer.py` writes the scale
+and zero point of each (`DETECT_INPUT0_*`, `DETECT_OUTPUT<i>_*`) to `model_params.h`. The
+first build kept ExecuTorch's portable quantize/dequantize operators at the boundary: at the
+Debug build's `-O1` they took ~25 ms per frame for the 150k values, more than the NPU.
+
+**Board side** (`src/fs_detect.c`, pure C99, host-tested): exact 5:3 box-filter resize of the
+RGB565 frame to 192x192 float, anchors computed from the index (24x24x2 stride-8, then
+12x12x6 stride-16), argmax + sigmoid decode of the raw head, hand box = palm box shifted
+0.5 x height toward the fingers, 2.6x, square, no rotation; EMA 0.5 on the box, held for up to
+4 missed frames, `no hand` on the fifth; the box is cropped from the full frame with a box
+filter to 128x128 (black off-frame) for the classifier. `src/app_main.cpp` runs `detect` then
+`classify` per frame; `-DFS_FIXED_CENTRE_CROP` keeps the old centre crop for A/B tests. The
+LCD keeps the crop view and adds an 80x80 inset of the whole frame with the box (green:
+detected this frame, grey: held, red frame: no hand). Live lines:
+
+    X 0.93 U 0.04 M 0.01 | box 112,84 96x96 s0.87 | det 3.1ms cam 2.0ms pre 0.8ms npu 4.2ms ui 1.6ms | 21.3 fps
+    no hand | det 3.1ms ui 1.2ms | 21.9 fps
+
+(`det` = resize + detector + decode, `cam` = frame wait + crop, `npu` = classifier.) Board
+timings on 2026-10-17 (Debug build, scene without a hand): `det 22.9ms` = resize 5.6 ms + NPU
+method 17.3 ms, `ui 1.7ms`, 18-20 fps; with a hand the classifier adds `npu 8.1ms`. The
+brief's budget (det + npu < 15 ms, >= 20 fps) is **not met yet**; the detector's NPU time is
+~5x Vela's ideal, the same ratio the classifier has always shown (see the handoff, section 4,
+for the suspects). Tests: `tests/test_detector.py` (host: C vs
+`ml/blazepalm.py` and numpy on `tests/fixtures/`; `FS_HW=1`: box or no-hand lines, fps,
+warm reset).
+
+**Open.** The classifier is still the centre-crop MobileNetV2-0.5; it should be fine-tuned on
+detector-geometry crops (section 7 of `documentation/hand-detection-handoff.md`). The
+detector's calibration uses dataset crops until `model/calib_detect_192.npy` exists.
+
 ## Next
 
 - S1 camera: capture frames from the DevKit camera, crop the fixed hand box to 128x128

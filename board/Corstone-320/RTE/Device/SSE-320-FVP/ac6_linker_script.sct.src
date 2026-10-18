@@ -95,6 +95,10 @@ LR_ROM1 __ROM1_BASE __ROM1_SIZE  {
 #if __ROM2_SIZE > 0
 LR_ROM2 __ROM2_BASE __ROM2_SIZE  {
   ER_ROM2 +0 __ROM2_SIZE {
+   ; The embedded ExecuTorch program (ai_layer/model_pte.c): the two-model program is
+   ; ~2 MB, more than the 2 MB FPGA SRAM holds next to the runtime, so it lives in DDR
+   ; (the Ethos-U85 reads it over AXI; a module selector outranks ER_ROM0's wildcard).
+   *model_pte.o (+RO)
    .ANY (+RO +XO)
   }
 }

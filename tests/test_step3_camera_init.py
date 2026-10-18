@@ -95,7 +95,7 @@ class Build(unittest.TestCase):
         self.assertNotRegex(out, r"fs_camera\.c:\d+:\d+: (warning|error)")
 
     def test_camera_code_is_linked(self):
-        for s in ("fs_camera_init", "fs_camera_latest_frame", "fs_camera_crop", "on_cpi_event", "Driver_CPI"):
+        for s in ("fs_camera_init", "fs_camera_latest_frame", "fs_camera_get_crop", "on_cpi_event", "Driver_CPI"):
             self.assertIn(s, self.syms)
 
     def test_frame_ring_is_three_full_frames_and_a_canary_in_bulk_sram(self):

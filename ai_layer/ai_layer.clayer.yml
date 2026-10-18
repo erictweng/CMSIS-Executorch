@@ -28,3 +28,4 @@ layer:
       files:
         - file: ./model_pte.c
         - file: ./model_pte.h
+        - file: ./model_params.h
