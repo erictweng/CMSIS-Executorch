@@ -446,7 +446,10 @@ void fs_ui_render(const fs_decoder_t* d, const fs_metrics_t* m, fs_event_t last_
   draw_confidence(letter, conf, d->live != 0);
 
   char line[48];
-  if (top3_letters[1])
+  if (d->pending)  // a motion letter's still shape is held: say so, or the wait looks like a freeze
+    std::snprintf(line, sizeof(line), "%c HELD: MOVE FOR %c  PATH %d%%", d->pending, d->pending == 'D' ? 'Z' : 'J',
+                  static_cast<int>(d->pending_path * 100.0f + 0.5f));
+  else if (top3_letters[1])
     std::snprintf(line, sizeof(line), "THEN %c %d%%  %c %d%%", top3_letters[1],
                   static_cast<int>(top3_probs[1] * 100.0f + 0.5f), top3_letters[2],
                   static_cast<int>(top3_probs[2] * 100.0f + 0.5f));

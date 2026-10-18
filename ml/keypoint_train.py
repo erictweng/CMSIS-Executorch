@@ -59,17 +59,30 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--hidden", type=int, default=HIDDEN)
     ap.add_argument("--rotation", type=float, default=10.0, help="augmentation: +- degrees about the wrist")
+    ap.add_argument("--upweight", action="append", default=[], metavar="SOURCE=K",
+                    help="repeat a source's training samples K times (a small live set next to large datasets)")
     args = ap.parse_args()
     X, y, src = load(args.npz)
+    upweight = {}
+    for item in args.upweight:
+        name, _, k = item.partition("=")
+        if name not in set(src.tolist()):
+            print(f"--upweight {item}: no samples from source {name!r}", file=sys.stderr)
+            return 2
+        upweight[name] = max(1, int(k or 1))
     rng = np.random.default_rng(0)
     val = np.zeros(len(y), bool)
     for s in np.unique(src):
         for c in np.unique(y):
             idx = np.where((src == s) & (y == c))[0]
             val[rng.choice(idx, max(1, len(idx) // 10), replace=False)] = True
-    Xt, yt = torch.from_numpy(X[~val]), torch.from_numpy(y[~val])
+    train_idx = np.where(~val)[0]
+    for name, k in upweight.items():
+        train_idx = np.concatenate([train_idx] + [np.where(~val & (src == name))[0]] * (k - 1))
+    Xt, yt = torch.from_numpy(X[train_idx]), torch.from_numpy(y[train_idx])
     Xv, yv = torch.from_numpy(X[val]), torch.from_numpy(y[val])
-    print(f"{len(y)} samples from {sorted(set(src.tolist()))}: train {len(yt)}, val {len(yv)}")
+    print(f"{len(y)} samples from {sorted(set(src.tolist()))}: train {len(yt)}"
+          + (f" (upweighted {upweight})" if upweight else "") + f", val {len(yv)}")
     torch.manual_seed(0)
     g = torch.Generator().manual_seed(0)
     hidden = args.hidden

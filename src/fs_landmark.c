@@ -41,6 +41,27 @@ fs_lm_crop_t fs_landmark_crop_frame(const fs_detection_t* det, float input_to_fr
   return c;
 }
 
+void fs_landmark_crop_smooth(fs_lm_crop_t* avg, bool* valid, const fs_lm_crop_t* raw, float alpha) {
+  if (!*valid) {
+    *avg = *raw;
+    *valid = true;
+    return;
+  }
+  avg->cx += alpha * (raw->cx - avg->cx);
+  avg->cy += alpha * (raw->cy - avg->cy);
+  avg->side += alpha * (raw->side - avg->side);
+  // The up vector is -(dx, dy); averaging down averages up. Renormalise; a degenerate
+  // average (opposite directions) keeps the previous orientation.
+  const float dx = avg->dx + alpha * (raw->dx - avg->dx), dy = avg->dy + alpha * (raw->dy - avg->dy);
+  const float len = sqrtf(dx * dx + dy * dy);
+  if (len > 1e-3f) {
+    avg->dx = dx / len;
+    avg->dy = dy / len;
+    avg->rx = avg->dy;  // right = up rotated by +90 degrees = (-uy, ux) = (dy, -dx)
+    avg->ry = -avg->dx;
+  }
+}
+
 // Bilinear sample at frame position (fx, fy) in pixel-centre coordinates; black off-frame.
 static inline void sample(const uint16_t* frame, float fx, float fy, float* r, float* g, float* b) {
   const float px = fx - 0.5f, py = fy - 0.5f;
@@ -102,12 +123,35 @@ void fs_landmark_decode(const int8_t lm63[FS_LM_FEATURES], fs_quant_t lq, int8_t
   out->right = (float)(handedness - hq.zero_point) * hq.scale;
 }
 
+void fs_landmark_presence_reset(fs_lm_presence_t* g) {
+  g->hand = false;
+  g->held = 0;
+}
+
+bool fs_landmark_presence_gate(fs_lm_presence_t* g, float presence) {
+  if (presence >= FS_LM_PRESENCE) {
+    g->hand = true;
+    g->held = 0;
+    return true;
+  }
+  if (!g->hand || presence < FS_LM_PRESENCE_HOLD || ++g->held > FS_LM_HOLD_FRAMES) {
+    fs_landmark_presence_reset(g);
+    return false;
+  }
+  return true;  // held
+}
+
 void fs_landmark_features(const fs_landmarks_t* lm, float f[FS_LM_FEATURES]) {
+  fs_landmark_features_as(lm, FS_LM_HANDEDNESS, f);
+}
+
+void fs_landmark_features_as(const fs_landmarks_t* lm, int handedness, float f[FS_LM_FEATURES]) {
   const float* w = lm->xyz[FS_LM_WRIST];
   const float mx = lm->xyz[FS_LM_MIDDLE_MCP][0] - w[0], my = lm->xyz[FS_LM_MIDDLE_MCP][1] - w[1];
   float unit = sqrtf(mx * mx + my * my);
   if (unit <= 1e-6f) unit = 1.0f;
-  const float mirror = lm->right >= 0.5f ? 1.0f : -1.0f;
+  const bool right = handedness == FS_LM_HANDEDNESS_RIGHT || (handedness == FS_LM_HANDEDNESS_AUTO && lm->right >= 0.5f);
+  const float mirror = right ? 1.0f : -1.0f;
   for (int i = 0; i < FS_LM_COUNT; ++i) {
     f[3 * i] = (lm->xyz[i][0] - w[0]) / unit * mirror;
     f[3 * i + 1] = (lm->xyz[i][1] - w[1]) / unit;

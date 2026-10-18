@@ -158,6 +158,104 @@ class LandmarkHost(unittest.TestCase):
         f = hl.features(self.ref["mp_hand_landmarks"].astype(np.float32), scalar(self.ref["mp_hand_right"]) >= 0.5)
         self.assertEqual(hl.LABELS[int(np.argmax(hl.mlp(f, w)))], "G")
 
+    def test_crop_smoothing_matches_the_reference(self):
+        """fs_landmark_crop_smooth: converges to a constant input, keeps the up vector unit
+        length, matches ml/handlandmark.smooth_crop, and a reset restarts from the raw crop."""
+        rng = np.random.default_rng(3)
+        n = 40
+        crops = []
+        for i in range(n):
+            if i < 20:  # jitter around one hand
+                centre, side = np.array([160.0, 150.0]) + rng.normal(0, 4, 2), 200.0 + rng.normal(0, 8)
+                up = np.array([0.3, -1.0]) + rng.normal(0, 0.1, 2)
+            else:  # a constant input: the average must converge to it
+                centre, side, up = np.array([100.0, 220.0]), 150.0, np.array([-0.6, -0.8])
+            up = up / np.linalg.norm(up)
+            crops.append((centre, side, up))
+        lines = [f"{c[0]} {c[1]} {s} {u[0]} {u[1]}" for c, s, u in crops]
+        lines.insert(30, "reset")  # mid-way through the constant stretch
+        path = Path(self.tmp.name) / "crops.txt"
+        path.write_text("\n".join(lines) + "\n")
+        alpha = hl.CROP_SMOOTH
+        got = np.array([[float(v) for v in line.split()] for line in self.run_mode("smooth", alpha, path).splitlines()])
+        self.assertEqual(got.shape, (n, 7))
+        avg, want = None, []
+        for i, (centre, side, up) in enumerate(crops):
+            if i == 30:
+                avg = None
+            avg = hl.smooth_crop(avg, (centre, side, np.array([-up[1], up[0]]), -up), alpha)
+            want.append([*avg[0], avg[1], *avg[2], *avg[3]])
+        np.testing.assert_allclose(got, np.array(want), atol=1e-3)
+        np.testing.assert_allclose(np.hypot(got[:, 5], got[:, 6]), 1.0, atol=1e-5)  # unit down vector
+        np.testing.assert_allclose(np.hypot(got[:, 3], got[:, 4]), 1.0, atol=1e-5)  # unit right vector
+        np.testing.assert_allclose(got[0], want[0], atol=1e-4)  # the first frame copies raw
+        # Converged within 1 % of the constant input before the reset (10 frames at 0.5).
+        c, s_, u = crops[29]
+        self.assertLess(np.abs(got[29, :2] - c).max(), 0.01 * s_)
+        self.assertLess(abs(got[29, 2] - s_), 0.01 * s_)
+        self.assertLess(np.abs(got[29, 5:7] + u).max(), 0.01)
+        # The reset restarts from the raw crop: identical to it on that frame.
+        c, s_, u = crops[30]
+        np.testing.assert_allclose(got[30], [*c, s_, -u[1], u[0], -u[0], -u[1]], atol=1e-4)
+
+    def test_fixed_handedness_ignores_the_score(self):
+        """FS_LM_HANDEDNESS_RIGHT: a frame the model scores as left (0.1) gives the same features
+        as one it scores as right (0.9); auto mirrors x between the two; left mirrors both."""
+        i = self.names.index("hand")
+        lm = self.ref["landmarks"][i].astype(np.float32)
+        lm_path = Path(self.tmp.name) / "lm.txt"
+        lm_path.write_text(" ".join(f"{v:.5f}" for v in lm))
+        centre, side, up = np.array([150.0, 170.0]), 180.0, np.array([0.0, -1.0])
+
+        def feats(hand_score, mode):
+            out = self.run_mode("decode", lm_path, 0.95, hand_score, *QLM, *QSIG, *QSIG, *centre, side, *up, mode).splitlines()
+            return np.array(out[2].split(), float)
+
+        right_r, right_l = feats(0.9, "right"), feats(0.1, "right")
+        np.testing.assert_allclose(right_r, right_l, atol=1e-6)
+        auto_r, auto_l = feats(0.9, "auto"), feats(0.1, "auto")
+        np.testing.assert_allclose(auto_r, right_r, atol=1e-6)
+        mirrored = auto_l.reshape(21, 3).copy()
+        mirrored[:, 0] = -mirrored[:, 0]
+        np.testing.assert_allclose(mirrored.ravel(), auto_r, atol=1e-6)
+        np.testing.assert_allclose(feats(0.9, "left"), auto_l, atol=1e-6)
+        # The build's default is RIGHT (fs_landmark.h) and the Python reference agrees.
+        header = (SRC / "fs_landmark.h").read_text()
+        self.assertIn("#define FS_LM_HANDEDNESS FS_LM_HANDEDNESS_RIGHT", header)
+        self.assertEqual(hl.HANDEDNESS, "right")
+        self.assertTrue(hl.right_hand(0.1) and hl.right_hand(0.9))
+        self.assertFalse(hl.right_hand(0.1, "auto"))
+
+    def test_presence_hold_matches_the_reference(self):
+        """fs_landmark_presence_gate: a tracked hand survives up to HOLD_FRAMES frames of presence
+        in [PRESENCE_HOLD, PRESENCE_THRESHOLD); a fresh hand needs the full threshold; a frame
+        below PRESENCE_HOLD, or a hold that runs out, loses the hand."""
+        seqs = {
+            "short dip stays one hand": ([0.9, 0.9, 0.3, 0.3, 0.9], [1, 1, 1, 1, 1]),
+            "six low frames drop it": ([0.9] + [0.3] * 6, [1, 1, 1, 1, 1, 1, 0]),
+            "a fresh hand needs 0.5": ([0.3, 0.4, 0.45, 0.5], [0, 0, 0, 1]),
+            "below the hold floor drops at once": ([0.9, 0.2, 0.3], [1, 0, 0]),
+            "a good frame resets the hold": ([0.9] + [0.3] * 5 + [0.9] + [0.3] * 5 + [0.3], [1] * 12 + [0]),
+            "reset": ([0.9, "reset", 0.3], [1, 0]),
+        }
+        for name, (values, want) in seqs.items():
+            with self.subTest(name):
+                path = Path(self.tmp.name) / "presence.txt"
+                path.write_text("\n".join(str(v) for v in values) + "\n")
+                got = [int(v) for v in self.run_mode("presence", path).split()]
+                self.assertEqual(got, want)
+                gate, ref = hl.PresenceGate(), []
+                for v in values:
+                    if v == "reset":
+                        gate = hl.PresenceGate()
+                    else:
+                        ref.append(int(gate.step(v)))
+                self.assertEqual(ref, want)
+        self.assertEqual((hl.PRESENCE_HOLD, hl.HOLD_FRAMES), (0.25, 5))
+        header = (SRC / "fs_landmark.h").read_text()
+        self.assertIn("#define FS_LM_PRESENCE_HOLD 0.25f", header)
+        self.assertIn("#define FS_LM_HOLD_FRAMES 5", header)
+
     def test_presence_is_low_on_black(self):
         self.assertLess(scalar(self.ref["presence"][self.names.index("black")]), 0.5)
 

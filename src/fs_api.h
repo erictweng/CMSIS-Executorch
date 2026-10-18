@@ -27,15 +27,25 @@ bool fs_model_init(void);
 bool fs_classify(const uint8_t rgb[FS_SIZE * FS_SIZE * 3], float probs[FS_CLASSES]);
 
 // ---- Decoder (Khangai) ----------------------------------------------------
+// Temporal averaging and hysteresis (fs_decoder.c): the 24 probabilities are averaged over
+// frames (exponential, weight prob_alpha on the new frame, started from the first frame so a
+// steady hand commits without warm-up, reset when the hand is lost) and every rule below
+// reads the averaged stream. A letter needs commit_threshold to start a streak and on each
+// frame the streak counts; once it is the candidate it stays the live letter down to
+// hold_threshold, so a confidence dip is not a gap. The same letter commits again only after
+// the hand was lost for release_ms or another letter committed in between.
 typedef struct {
   float commit_threshold;   // default 0.60
-  int commit_frames;        // default 3 consecutive frames
+  float hold_threshold;     // default 0.45: the live candidate stays while >= this (0: = commit_threshold)
+  float prob_alpha;         // default 0.4: weight of the new frame in the probability average (0 / 1: off)
+  int commit_frames;        // default 3 consecutive frames at or above commit_threshold
   uint32_t space_ms;        // default 1000: no confident letter this long -> space
-  uint32_t release_ms;      // default 300: gap needed before the same letter commits again
-  // Motion letters (fs_decoder_step_motion): D and I are held as "pending" until the hand
-  // moves on; the fingertip's path meanwhile decides D vs Z and I vs J.
-  float motion_threshold;   // default 1.0: path length in hand sizes that makes it Z / J
-  float motion_deadband;    // default 0.06: per-frame steps below this (hand sizes) are jitter
+  uint32_t release_ms;      // default 300: no hand this long before the same letter commits again
+  // Motion letters (fs_decoder_step_motion): D and I are held as "pending"; the fingertip's
+  // displacement from where the hold began decides D vs Z and I vs J. Z / J commit the
+  // moment the displacement reaches motion_threshold; D / I commit when the signer moves on.
+  float motion_threshold;   // default 1.0: displacement in hand sizes that makes it Z / J
+  float motion_deadband;    // default 0.06: displacement below this (hand sizes) reads as 0
   uint32_t pending_timeout_ms;  // default 1500: a pending letter held this long resolves as is
   int pending_drop_frames;  // default 3: frames of another/no letter that end the pending hold
 } fs_decoder_cfg_t;
@@ -57,18 +67,21 @@ typedef struct {
   char text[FS_TEXT_MAX];   // committed text; oldest characters drop off when full
   int len;
   char live;                // current top letter (or 0 if below threshold)
-  float live_conf;          // its probability
+  float live_conf;          // its averaged probability
   char pending;             // 'D' or 'I' held until the hand moves on (0 = none)
-  float pending_path;       // fingertip path so far, in hand sizes
+  float pending_path;       // the fingertip's largest displacement from the hold's start, in hand sizes
   // private state (implementation detail; zero-initialised by fs_decoder_init)
+  float avg[FS_CLASSES];    // the averaged probabilities (what the rules read)
+  bool avg_valid;
   char cand, last_committed;
   int streak;
   bool released;
   uint32_t last_conf_ms;
+  uint32_t last_hand_ms;
   uint32_t pending_since_ms;
   int pending_drop;
-  float last_tip[2];
-  bool last_tip_valid;
+  float start_tip[2];       // where the fingertip was when the hold began
+  bool start_tip_valid;
 } fs_decoder_t;
 
 void fs_decoder_init(fs_decoder_t* d, const fs_decoder_cfg_t* cfg);  // cfg NULL -> defaults

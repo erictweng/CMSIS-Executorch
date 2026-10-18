@@ -72,6 +72,16 @@ fallback branch `detect/blazepalm`.
 7. **Self-test contract kept.** Boot still prints `Test_result: PASS`: the baked-in test
    crop goes through `landmark` + MLP and must give its letter.
 8. **Fixed-centre fallback stays** behind `FS_FIXED_CENTRE_CROP` for A/B, as today.
+9. **Temporal averaging, three stages, plus decoder hysteresis** (spec:
+   `documentation/temporal-average-plan.md`). The crop geometry the landmark model sees is
+   averaged (`fs_landmark_crop_smooth`, 0.5), the MLP features are averaged
+   (`fs_landmark_smooth`, 0.5), and the decoder averages the 24 probabilities (`prob_alpha`
+   0.4) and reads only the averaged stream, with a hold threshold (0.45) under the commit
+   threshold (0.60). The same letter repeats only after the hand was lost for `release_ms`:
+   a confidence dip is exactly the signal the noise fakes, so it no longer re-arms a letter.
+   EMA over a sliding window (one state, one number to tune); averaging inside the decoder
+   so the host tests cover it and the displayed confidence is what commits; no majority
+   vote and no sequence model (fallback if the board measurements say the spam remains).
 
 ## 3. Files
 
@@ -161,3 +171,34 @@ loop >= 12 fps; otherwise ship `detect/blazepalm` + the data route for the demo.
   (was 90.5 % on the board-pipeline set with the MediaPipe-only MLP). Features are averaged
   over frames before the MLP (`fs_landmark_smooth`, weight 0.5, reset when the hand is lost).
   Image built with the new weights; flash pending (the board dropped off USB again).
+- 2026-10-18: **temporal averaging implemented, not yet flashed** (decision 9; spec in
+  `documentation/temporal-average-plan.md`). Decoder: probabilities averaged (`prob_alpha`
+  0.4, first frame copies raw, reset without a hand), hysteresis (`hold_threshold` 0.45: a
+  held frame keeps the candidate but does not count toward `commit_frames`), repeat rule tied
+  to hand loss (`release_ms` of no hand; a confidence gap no longer re-arms a letter). Crop
+  geometry averaged (`fs_landmark_crop_smooth`, 0.5, reset with the feature average). Host
+  tests: the pre-averaging decoder suite runs with `prob_alpha` 1.0 as the regression guard
+  (double L now loses the hand between the L's), ten new averaging tests (one commit over a
+  10 s hold with dips, A/B flicker commits nothing, no warm-up, letter change in 7 frames,
+  Z / J with averaging on); `tests/test_landmark.py` checks the crop average against
+  `ml/handlandmark.smooth_crop`. 287 decoder checks green. Board measurement (step 4 of the
+  spec: commits per 10 s hold, time to first letter, HELLO / ABC) pending the USB.
+- 2026-10-18 (later): **signing session findings and fixes, flashed, not yet scored.** Two 60 s
+  runs of `tests/board_telemetry.py --handedness` while signing: (1) the model's handedness
+  score flipped on crossed shapes (R: a 10 s stretch read as left at 0.01-0.08, mirrored
+  features scored V 0.88; ~7 % of frames flipped, vs 1.2 % on open shapes), (2) a hand box
+  of ~55 px had presence 0.2-0.4 on ~45 % of samples and dropped out (resets, repeated
+  letters), none at >= 75 px, (3) R with correct handedness still spread over R/X/K/T/D at
+  0.25-0.45: training data, not noise. Changes (`documentation/letter-accuracy-prompt.md`
+  tasks 1-4): `FS_LM_HANDEDNESS` fixed to RIGHT (`fs_landmark_features_as`, auto / left
+  selectable; datasets keep auto); presence gate with a hold (`fs_landmark_presence_gate`:
+  a tracked hand survives 5 frames in [0.25, 0.5)); the motion rule reads the fingertip's
+  displacement from the hold's start instead of a path sum (jitter no longer turns a held D
+  into Z), Z / J commit the moment the threshold is reached, the still shape after the
+  stroke does not pend or commit again until the hand is lost ("ZD" cannot happen), and the
+  panel shows "D HELD: MOVE FOR Z  PATH n%" while pending; `g_fs_lm_dump` publishes the
+  landmarks for `tests/capture_keypoints.py` (board keypoints per letter -> npz in the
+  dataset layout; `ml/keypoint_train.py --upweight board-live=K`). Host: 308 decoder checks,
+  12 Python tests green. Pending the signer: capture R U K H N M S T O Q D I + A B L Y,
+  retrain, score the 24 letters (task 5). Open: the board restarted once mid-run
+  (counters zeroed) with no reset pressed.

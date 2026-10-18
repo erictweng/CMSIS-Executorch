@@ -195,7 +195,50 @@ status: `documentation/landmark-plan.md`; reference `ml/handlandmark.py`; board 
 Numbers so far (host): exported graph vs TFLite 2e-4 px; int8 vs float landmarks 0.8 px
 median / 4.2 px p90 on the crop, presence agreement 96 %; MLP 95.8 % on held-out Marxulia
 landmarks (MediaPipe's pipeline); program 2,265,152 bytes; Vela scratch 1185 KiB (temp pool
-1.5 MB); DevKit image MRAM 2.57 of 3.44 MB, SRAM0 3.82 of 3.94 MB. Board numbers: pending.
+1.5 MB); DevKit image MRAM 2.57 of 3.44 MB, SRAM0 3.82 of 3.94 MB. Board: detector 22.9 ms,
+landmark stage 6.0 ms, 15-16 fps with a hand.
+
+Knobs and tools from the signing sessions (`src/fs_landmark.h`, `src/fs_api.h`):
+
+- `FS_LM_HANDEDNESS` (default RIGHT): the model's handedness score is ignored; AUTO mirrors
+  by it as before. Set LEFT for a left-handed signer. The datasets keep AUTO (clean photos,
+  reliable score).
+- `FS_LM_PRESENCE` 0.5 / `FS_LM_PRESENCE_HOLD` 0.25 / `FS_LM_HOLD_FRAMES` 5: a tracked hand
+  survives up to 5 frames of presence in [0.25, 0.5). A far hand (box ~55 px) scores 0.2-0.4
+  for a frame or two; signing with the box >= 75 px avoids it altogether.
+- Motion letters: `motion_threshold` 1.0 hand sizes of fingertip displacement from where the
+  D / I hold began (not a path sum); Z / J commit when reached; the panel's guess line shows
+  `D HELD: MOVE FOR Z  PATH n%` while pending.
+- `tests/board_telemetry.py --handedness` (flips, uncertain frames), `tests/capture_keypoints.py
+  --letter R --seconds 10` (the board's landmarks for a letter -> `model/keypoints_board_live.npz`),
+  then `ml/keypoint_train.py model/keypoints_marxulia.npz model/keypoints_marxulia_board.npz
+  model/keypoints_board_live.npz --upweight board-live=4`, `create_ai_layer.py`, build, flash.
+
+## Decoder (temporal averaging, branch `landmark/pipeline`)
+
+`src/fs_decoder.c` turns the per-frame probabilities into text. It no longer decides each
+frame on its own (spec: `documentation/temporal-average-plan.md`): the 24 probabilities are
+averaged over frames and every rule reads the average. The parameters, all in
+`fs_decoder_cfg_t` (`src/fs_api.h`), and what to tune when:
+
+| Parameter | Default | Tune when |
+|---|---|---|
+| `prob_alpha` | 0.4 | letter changes feel laggy: raise toward 0.5; spam remains: lower toward 0.3. 1.0 turns averaging off |
+| `commit_threshold` | 0.60 | letters sit at 0.5-0.6 on a real hand: lower to 0.50 (safe once averaging is on) |
+| `hold_threshold` | 0.45 | the live letter drops out mid-hold: lower (keep under `commit_threshold`; 0 = no hysteresis) |
+| `commit_frames` | 3 | first letter too slow: 2 is safe on the averaged stream |
+| `release_ms` | 300 | double letters ("LL") need a shorter or longer bounce of the hand out of view |
+| `space_ms` | 1000 | spaces come too early or late after the hand drops |
+
+Two more averages run before the decoder: the crop geometry the landmark model sees
+(`FS_LM_CROP_SMOOTH` 0.5, `src/fs_landmark.h`) and the MLP features (`FS_LM_SMOOTH` 0.5).
+Both restart when the hand is lost. Expected budget at 15 fps: first letter on screen in
+about 7 frames (450 ms), a change to a new letter in 5-7 frames.
+
+Rules worth knowing when reading `decoder:` lines or `tests/board_telemetry.py`: the same
+letter repeats only after the hand left the frame for `release_ms` (a confidence dip never
+re-arms it); the displayed confidence is the averaged one; `g_fs_tele[1]` is still the raw
+MLP top-1 probability. Host tests: `python3 -m unittest tests.test_decoder_host` (no venv).
 
 ## Next
 

@@ -64,8 +64,16 @@ volatile uint32_t g_fs_dump_request = 0;
 volatile uint32_t g_fs_loop_frames = 0;  // live-loop iterations (frames through the detector)
 // Per-frame telemetry for the debugger (tests/fs_tools.py read_word): the UART is not always
 // available. Letters as ASCII codes, probabilities and times x1000, path in 1/1000 hand sizes.
-volatile uint32_t g_fs_tele[12] = {0};  // 0 letter 1 prob 2 presence 3 fps 4 det_ms 5 lm_ms 6 box_x 7 box_y 8 box_w
+volatile uint32_t g_fs_tele[17] = {0};  // 0 letter 1 prob 2 presence 3 fps 4 det_ms 5 lm_ms 6 box_x 7 box_y 8 box_w
                                        // 9 pending letter 10 path 11 committed text length
+                                       // 12 handedness x1000 (this frame; >= 500 = right, no mirror)
+                                       // counters since boot: 13 hand frames 14 left/right flips between
+                                       // consecutive hand frames 15 frames with handedness in [0.3, 0.7]
+                                       // 16 left (mirrored) frames
+// The landmarks the MLP's features are built from, for tests/capture_keypoints.py (J-Link):
+// 0 hand-frame counter (advances only on frames with a hand), 1 presence x1000,
+// 2 handedness x1000, 3.. the 21 x (x, y, z) frame-pixel landmarks as float bits.
+volatile uint32_t g_fs_lm_dump[3 + FS_LM_FEATURES] = {0};
 }
 
 namespace {
@@ -226,11 +234,33 @@ struct TopK {
   float probabilities[kClasses];  // every class, for the decoder
 };
 
-// Letter probabilities from the landmarks through the MLP; top-3. The features are averaged
-// over frames (fs_landmark_smooth) so the letter and its confidence do not jitter; the
-// average restarts whenever the hand was lost (letters_reset).
+// Letter probabilities from the landmarks through the MLP; top-3. The crop geometry the
+// landmark model sees (fs_landmark_crop_smooth) and the features (fs_landmark_smooth) are
+// averaged over frames so the letter and its confidence do not jitter; both averages restart
+// whenever the hand was lost (letters_reset). The decoder averages the probabilities too.
 fs_lm_smooth_t g_smooth = {{0}, false};
-void letters_reset() { fs_landmark_smooth_reset(&g_smooth); }
+fs_lm_crop_t g_crop_avg = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+bool g_crop_avg_valid = false;
+fs_lm_presence_t g_presence = {false, 0};  // the presence gate with its hold (fs_landmark.h)
+void letters_reset() {
+  fs_landmark_smooth_reset(&g_smooth);
+  fs_landmark_presence_reset(&g_presence);
+  g_crop_avg_valid = false;
+}
+
+// Publish this frame's landmarks for the laptop (tests/capture_keypoints.py reads them over
+// J-Link with the core halted, so the block is consistent).
+void publish_landmarks(const fs_landmarks_t& lm) {
+  for (int i = 0; i < FS_LM_COUNT; ++i)
+    for (int c = 0; c < 3; ++c) {
+      uint32_t bits;
+      memcpy(&bits, &lm.xyz[i][c], sizeof bits);
+      g_fs_lm_dump[3 + 3 * i + c] = bits;
+    }
+  g_fs_lm_dump[1] = static_cast<uint32_t>(lm.presence * 1000.f);
+  g_fs_lm_dump[2] = static_cast<uint32_t>(lm.right * 1000.f);
+  g_fs_lm_dump[0]++;
+}
 void letters(const fs_landmarks_t& lm, TopK* r) {
   float f[FS_LM_FEATURES], fs[FS_LM_FEATURES];
   fs_landmark_features(&lm, f);
@@ -262,7 +292,8 @@ void preview_crop(const int8_t* crop, uint8_t* rgb) {
 
 // One whole frame through the pipeline: detector, crop, landmarks, letters. Returns false
 // on a runtime error. *hand: a hand with presence >= threshold was found (fresh detection,
-// or the held crop geometry `*crop` when the detector missed and hold is true).
+// or the held crop geometry `*crop` when the detector missed and hold is true). A fresh
+// detection updates the averaged crop geometry, which is what the landmark model sees.
 bool infer(EmbeddedModule& module, const uint16_t* frame, bool hold, fs_detection_t* det, bool* detected,
            fs_lm_crop_t* crop, fs_landmarks_t* lm, float crop_xy[FS_LM_COUNT][2], bool* hand, TopK* r,
            uint32_t* t_detected, uint32_t* t_cropped) {
@@ -274,16 +305,21 @@ bool infer(EmbeddedModule& module, const uint16_t* frame, bool hold, fs_detectio
     letters_reset();
     return true;
   }
-  if (*detected) *crop = fs_landmark_crop_frame(det, kInputToFrame);
+  if (*detected) {
+    const fs_lm_crop_t raw = fs_landmark_crop_frame(det, kInputToFrame);
+    fs_landmark_crop_smooth(&g_crop_avg, &g_crop_avg_valid, &raw, FS_LM_CROP_SMOOTH);
+    *crop = g_crop_avg;
+  }
   fs_landmark_crop(frame, crop, g_landmark_input, kLandmarkInput);
   if (t_cropped) *t_cropped = cycles();
   if (!landmark(module, crop, lm, crop_xy)) return false;
-  if (lm->presence < FS_LM_PRESENCE) {
+  if (!fs_landmark_presence_gate(&g_presence, lm->presence)) {  // no hand (the hold ran out or never started)
     letters_reset();
     return true;
   }
   *hand = true;
   letters(*lm, r);
+  publish_landmarks(*lm);
   return true;
 }
 
@@ -505,6 +541,20 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     g_fs_tele[9] = static_cast<uint32_t>(decoder.pending);
     g_fs_tele[10] = static_cast<uint32_t>(decoder.pending_path * 1000.f);
     g_fs_tele[11] = static_cast<uint32_t>(decoder.len);
+    {  // handedness diagnostics: does the left-hand mirror flip between frames of one hand?
+      static int last_side = -1;  // -1: no hand in the previous frame
+      if (hand) {
+        const int side = lm.right >= 0.5f ? 1 : 0;
+        g_fs_tele[12] = static_cast<uint32_t>(lm.right * 1000.f);
+        g_fs_tele[13]++;
+        if (last_side >= 0 && side != last_side) g_fs_tele[14]++;
+        if (lm.right >= 0.3f && lm.right <= 0.7f) g_fs_tele[15]++;
+        if (!side) g_fs_tele[16]++;
+        last_side = side;
+      } else {
+        last_side = -1;
+      }
+    }
     if (event == FS_EV_LETTER || (decoder.pending && (g_fs_loop_frames & 7) == 0))
       printf("decoder: %s%c path %.2f text \"%s\"\n", decoder.pending ? "pending " : "committed ",
              decoder.pending ? decoder.pending : decoder.text[decoder.len ? decoder.len - 1 : 0], decoder.pending_path,
