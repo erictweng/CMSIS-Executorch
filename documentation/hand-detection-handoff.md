@@ -11,6 +11,11 @@ LCD, `no hand` without one. The section 5 bug (boxes off the hands) was the inpu
 BlazePalm 192 takes `[0, 1]`, not `[-1, 1]`. The first board build spent 51 ms per frame in
 the detector stage; see section 4 "Board timing" for the breakdown and what was done about it.
 
+> **2026-10-17 late:** the classifier was replaced on branch `landmark/pipeline` (MediaPipe hand
+> landmarks + keypoint MLP, motion letters Z/J in the decoder): read
+> `documentation/landmark-plan.md` for that branch. This file describes `detect/blazepalm`
+> (merged into `fingerspell`), which the landmark branch builds on.
+
 ## 1. Repo and branch
 
 - Repo `erictweng/CMSIS-Executorch` (remote `fork`), working copy `/Users/ericweng/CMSIS-Executorch`.
