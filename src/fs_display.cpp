@@ -2,11 +2,13 @@
 // Fingerspell on the DevKit-E8 LCD (ILI9806E, 480x800 portrait, RGB565 via the CDC200).
 //
 // The UI half of fs_api.h: fs_ui_init() brings the panel up, fs_ui_render() draws one frame.
-// Layout, top to bottom: title, the 128x128 hand crop the classifier sees scaled 3x (384x384)
-// in a 1 px frame with the hand skeleton (21 landmarks) over it and an 80x80 inset of the whole
-// camera frame with the detected hand box in its top-right corner, the live letter in big type with its confidence as a percentage and a
+// Layout, top to bottom: title, the whole 320x320 camera frame scaled 6/5 (384x384) in a 1 px
+// frame with the detected hand box and the hand skeleton (21 landmarks) over it, and a 100 px
+// inset of the 128x128 crop the classifier sees in its top-right corner, the live letter in big type with its confidence as a percentage and a
 // bar (green from the decoder's commit threshold up, grey below), the 2nd/3rd guesses, the
-// stage timings and fps, and the text the decoder has committed.
+// stage timings and fps, and the text the decoder has committed. A newly committed letter is
+// shown dimmed for kHoldMs before it joins that text, and a letter committed meanwhile
+// replaces it (fs_commit_hold.h): a wrong letter corrected within the hold never shows.
 //
 // Budget (fs_api.h): fs_ui_render() must return in < 10 ms. The static parts are drawn once;
 // per frame only the crop is rewritten (as whole rows, no per-pixel calls) and a text field
@@ -15,6 +17,7 @@
 #include "fs_display.h"
 
 #if defined(FINGERSPELL_LCD)
+#include "fs_commit_hold.h"  // the panel's copy of the committed text, with the hold on new letters
 #include "fs_detect.h"  // FS_DET_FRAME
 #include <cstdio>
 #include <cstring>
@@ -80,7 +83,13 @@ constexpr int kCropSize = FS_SIZE * kCropScale;             // 384
 constexpr int kCropX = (kWidth - kCropSize) / 2;            // 48
 constexpr int kCropY = 44;
 // The frame inset: the 320x320 camera frame subsampled 4x in the crop view's top-right.
-constexpr int kInsetSize = 80, kInsetStep = 320 / kInsetSize;
+// The main view (kCropX/Y, kCropSize: the 384 px square) shows the whole 320x320 camera frame
+// scaled 6/5 with the hand box and skeleton; the 128x128 crop the classifier sees is the
+// inset in its top-right corner (100 px, 1 px frame). The self-test screen still uses the
+// square for the test crop at 3x (blit_crop).
+constexpr int kViewNum = 6, kViewDen = 5;                        // 320 * 6 / 5 = 384
+static_assert(FS_DET_FRAME * kViewNum / kViewDen == kCropSize, "the frame view must fill the square");
+constexpr int kInsetSize = 100;
 constexpr int kInsetX = kCropX + kCropSize - kInsetSize - 4, kInsetY = kCropY + 4;
 constexpr int kLetterX = 48, kLetterY = 448, kLetterScale = 12;  // 60 x 84 px
 constexpr int kPercentX = 132, kPercentY = 452, kPercentScale = 5;
@@ -89,6 +98,10 @@ constexpr int kGuessY = 548, kGuessScale = 3;
 constexpr int kMetricsY = 580, kMetricsScale = 3;
 constexpr int kWordsY = 616, kWordsH = 176, kWordsScale = 5;    // 4 rows of 14 chars
 constexpr int kWordsCols = 14, kWordsRows = 4, kWordsRowH = 42;
+constexpr int kWordsX = 36, kWordsTextY = kWordsY + 10;  // the first cell of the text card
+// A committed letter is shown dimmed for this long before it joins the confirmed line; a letter
+// committed meanwhile replaces it (fs_commit_hold.h). UI only: the decoder keeps both.
+constexpr uint32_t kHoldMs = 700;
 
 // Five columns per glyph, with seven rows encoded in the low bits (bit 0 = top row).
 constexpr uint8_t kLetters[26][5] = {
@@ -187,12 +200,16 @@ Field percent_field = {kPercentX, kPercentY, 4 * 6 * kPercentScale, 7 * kPercent
 Field guess_field = {kCropX, kGuessY, kWidth - 2 * kCropX, 7 * kGuessScale, kGuessScale, kBackground, {}, 0, false};
 Field metrics_field = {kCropX, kMetricsY, kWidth - 2 * kCropX, 7 * kMetricsScale, kMetricsScale, kBackground, {}, 0, false};
 Field words_field[kWordsRows] = {
-    {36, kWordsY + 10 + 0 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false},
-    {36, kWordsY + 10 + 1 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false},
-    {36, kWordsY + 10 + 2 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false},
-    {36, kWordsY + 10 + 3 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false}};
+    {kWordsX, kWordsTextY + 0 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false},
+    {kWordsX, kWordsTextY + 1 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false},
+    {kWordsX, kWordsTextY + 2 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false},
+    {kWordsX, kWordsTextY + 3 * kWordsRowH, kWordsCols * 6 * kWordsScale, 7 * kWordsScale, kWordsScale, kCard, {}, 0, false}};
 int bar_fill = -1;
 uint16_t bar_color;
+bool crop_main = false;         // UP on the joystick: the crop large and the camera small instead
+fs_commit_hold_t commit_hold;   // the panel's text and the letter on hold
+int held_cell_drawn = -1;       // where the dimmed letter was drawn last frame (-1: none)
+char held_char_drawn = 0;
 
 // The parts that never change: title, the crop's 1 px frame, the bar's trough, the words card.
 void draw_static() {
@@ -236,21 +253,73 @@ void blit_crop(const uint8_t* rgb) {
   mark_rows(kCropY, kCropY + kCropSize - 1);
 }
 
-// The frame inset (RGB565 frame pixels copy straight into the frame buffer) with its 1 px
-// frame, and the hand box scaled onto it; drawn over the crop view, inside its rows.
-void blit_inset() {
+// Frame pixel -> main-view pixel (6/5), and a view coordinate clamped to the square.
+inline int view_of(float frame_px) { return static_cast<int>(frame_px * kViewNum / kViewDen); }
+inline int clamp_view(int v) { return v < 0 ? 0 : v > kCropSize - 1 ? kCropSize - 1 : v; }
+
+// The whole camera frame (RGB565, copied straight into the frame buffer) scaled 6/5 into the
+// main view, nearest neighbour through a column map, with the hand box on it (2 px, green
+// while the detector sees the hand this frame, grey while the box is held). The view's 1 px
+// frame turns red while there is no hand.
+void blit_frame() {
   if (!detection_frame) return;
+  static int xmap[kCropSize];
+  static bool mapped = false;
+  if (!mapped) {
+    for (int x = 0; x < kCropSize; ++x) {
+      const int sx = x * kViewDen / kViewNum;
+      xmap[x] = kMirrorX ? FS_DET_FRAME - 1 - sx : sx;
+    }
+    mapped = true;
+  }
+  for (int y = 0; y < kCropSize; ++y) {
+    int sy = y * kViewDen / kViewNum;
+    if (kFlipY) sy = FS_DET_FRAME - 1 - sy;
+    const uint16_t* src = detection_frame + sy * FS_DET_FRAME;
+    uint16_t* dst = framebuffer + (kCropY + y) * kWidth + kCropX;
+    for (int x = 0; x < kCropSize; ++x) dst[x] = src[xmap[x]];
+  }
+  mark_rows(kCropY, kCropY + kCropSize - 1);
+  if (!detection_hand) return;
+  int b[4];
+  for (int i = 0; i < 4; ++i) b[i] = clamp_view(view_of(detection_box[i]));
+  const uint16_t color = detection_fresh ? kGreen : kMuted;
+  rect(kCropX + b[0], kCropY + b[1], b[2] - b[0] + 1, 2, color);
+  rect(kCropX + b[0], kCropY + b[3] - 1, b[2] - b[0] + 1, 2, color);
+  rect(kCropX + b[0], kCropY + b[1], 2, b[3] - b[1] + 1, color);
+  rect(kCropX + b[2] - 1, kCropY + b[1], 2, b[3] - b[1] + 1, color);
+}
+
+// The square's 1 px frame: red while there is no hand.
+void draw_view_edge() {
+  const uint16_t edge = detection_hand ? kMuted : kRed;
+  rect(kCropX - 1, kCropY - 1, kCropSize + 2, 1, edge);
+  rect(kCropX - 1, kCropY + kCropSize, kCropSize + 2, 1, edge);
+  rect(kCropX - 1, kCropY, 1, kCropSize, edge);
+  rect(kCropX + kCropSize, kCropY, 1, kCropSize, edge);
+}
+
+// The swapped layout's inset: the whole camera frame in the 100 px inset (nearest neighbour)
+// with the hand box on it; drawn over the crop view, inside its rows.
+void blit_frame_inset() {
+  if (!detection_frame) return;
+  static int map[kInsetSize];
+  static bool mapped = false;
+  if (!mapped) {
+    for (int i = 0; i < kInsetSize; ++i) map[i] = i * FS_DET_FRAME / kInsetSize;
+    mapped = true;
+  }
   const uint16_t edge = detection_hand ? kMuted : kRed;
   rect(kInsetX - 1, kInsetY - 1, kInsetSize + 2, kInsetSize + 2, edge);
   for (int y = 0; y < kInsetSize; ++y) {
-    const uint16_t* src = detection_frame + (y * kInsetStep) * FS_DET_FRAME;
+    const uint16_t* src = detection_frame + map[y] * FS_DET_FRAME;
     uint16_t* dst = framebuffer + (kInsetY + y) * kWidth + kInsetX;
-    for (int x = 0; x < kInsetSize; ++x) dst[x] = src[x * kInsetStep];
+    for (int x = 0; x < kInsetSize; ++x) dst[x] = src[map[x]];
   }
   if (!detection_hand) return;
   int b[4];
   for (int i = 0; i < 4; ++i) {
-    int v = static_cast<int>(detection_box[i] / kInsetStep);
+    const int v = static_cast<int>(detection_box[i] * kInsetSize / FS_DET_FRAME);
     b[i] = v < 0 ? 0 : v > kInsetSize - 1 ? kInsetSize - 1 : v;
   }
   const uint16_t color = detection_fresh ? kGreen : kMuted;
@@ -258,6 +327,26 @@ void blit_inset() {
   rect(kInsetX + b[0], kInsetY + b[3], b[2] - b[0] + 1, 1, color);
   rect(kInsetX + b[0], kInsetY + b[1], 1, b[3] - b[1] + 1, color);
   rect(kInsetX + b[2], kInsetY + b[1], 1, b[3] - b[1] + 1, color);
+}
+
+// The 128x128 crop the classifier sees, in the inset (100 px, nearest neighbour) with its
+// 1 px frame; drawn over the main view, inside its rows.
+void blit_hand_inset(const uint8_t* rgb) {
+  static int map[kInsetSize];
+  static bool mapped = false;
+  if (!mapped) {
+    for (int i = 0; i < kInsetSize; ++i) map[i] = i * FS_SIZE / kInsetSize;
+    mapped = true;
+  }
+  const uint16_t edge = detection_hand ? kMuted : kRed;
+  rect(kInsetX - 1, kInsetY - 1, kInsetSize + 2, kInsetSize + 2, edge);
+  for (int y = 0; y < kInsetSize; ++y) {
+    uint16_t* dst = framebuffer + (kInsetY + y) * kWidth + kInsetX;
+    for (int x = 0; x < kInsetSize; ++x) {
+      const uint8_t* px = source_pixel(rgb, map[x], map[y]);
+      dst[x] = rgb565(px[0], px[1], px[2]);
+    }
+  }
 }
 
 // A 1 px line between two frame-buffer points (clipped by rect()).
@@ -270,23 +359,38 @@ void line(int x0, int y0, int x1, int y1, uint16_t color) {
   }
 }
 
-// The hand skeleton on the crop view (crop-space landmarks) and dots on the inset (frame
-// pixels), drawn after the crop and the inset, inside their rows.
+// The hand skeleton on the main view and dots on the inset, drawn after both, inside their
+// rows. Default layout: frame-pixel landmarks scaled 6/5 on the camera view, crop-space dots
+// on the hand inset; swapped: crop-space skeleton on the crop view, frame-pixel dots on the
+// camera inset.
 void draw_landmarks() {
   if (!landmarks_valid) return;
   int px[21], py[21];
   const float side = landmarks_box[2] - landmarks_box[0] > 1.f ? landmarks_box[2] - landmarks_box[0] : 1.f;
   for (int i = 0; i < 21; ++i) {
-    px[i] = kCropX + static_cast<int>((landmarks_frame[i][0] - landmarks_box[0]) * kCropSize / side);
-    py[i] = kCropY + static_cast<int>((landmarks_frame[i][1] - landmarks_box[1]) * kCropSize / side);
+    if (crop_main) {
+      px[i] = kCropX + static_cast<int>((landmarks_frame[i][0] - landmarks_box[0]) * kCropSize / side);
+      py[i] = kCropY + static_cast<int>((landmarks_frame[i][1] - landmarks_box[1]) * kCropSize / side);
+    } else {
+      px[i] = kCropX + view_of(landmarks_frame[i][0]);
+      py[i] = kCropY + view_of(landmarks_frame[i][1]);
+    }
   }
   auto inside = [](int x, int y) { return x >= kCropX && x < kCropX + kCropSize && y >= kCropY && y < kCropY + kCropSize; };
   for (const auto& b : kBones)
     if (inside(px[b[0]], py[b[0]]) && inside(px[b[1]], py[b[1]])) line(px[b[0]], py[b[0]], px[b[1]], py[b[1]], kGreen);
+  const int dot = crop_main ? 5 : 3;
   for (int i = 0; i < 21; ++i)
-    if (inside(px[i], py[i])) rect(px[i] - 2, py[i] - 2, 5, 5, i == 0 ? kRed : kWhite);
+    if (inside(px[i], py[i])) rect(px[i] - dot / 2, py[i] - dot / 2, dot, dot, i == 0 ? kRed : kWhite);
   for (int i = 0; i < 21; ++i) {
-    int x = static_cast<int>(landmarks_frame[i][0] / kInsetStep), y = static_cast<int>(landmarks_frame[i][1] / kInsetStep);
+    int x, y;
+    if (crop_main) {
+      x = static_cast<int>(landmarks_frame[i][0] * kInsetSize / FS_DET_FRAME);
+      y = static_cast<int>(landmarks_frame[i][1] * kInsetSize / FS_DET_FRAME);
+    } else {
+      x = static_cast<int>((landmarks_frame[i][0] - landmarks_box[0]) * kInsetSize / side);
+      y = static_cast<int>((landmarks_frame[i][1] - landmarks_box[1]) * kInsetSize / side);
+    }
     if (x < 0 || y < 0 || x >= kInsetSize || y >= kInsetSize) continue;
     rect(kInsetX + x, kInsetY + y, 1, 1, kWhite);
   }
@@ -309,10 +413,11 @@ void draw_confidence(char letter, float conf, bool committed_colour) {
   }
 }
 
-// The decoder's text, last kWordsCols * kWordsRows characters, wrapped into the card.
-void draw_words(const char* words, int len, uint16_t color) {
+// The committed text, last kWordsCols * kWordsRows characters, wrapped into the card.
+// `reserve` cells are kept free after the text (the dimmed letter on hold).
+void draw_words(const char* words, int len, uint16_t color, int reserve = 0) {
   const int visible = kWordsCols * kWordsRows;
-  const char* p = words + (len > visible ? len - visible : 0);
+  const char* p = words + (len + reserve > visible ? len + reserve - visible : 0);
   for (int row = 0; row < kWordsRows; ++row) {
     char part[kWordsCols + 1] = {};
     int i = 0;
@@ -356,6 +461,7 @@ void enable_display_power() {
 bool fs_ui_init(void) {
   if (display_started) return true;
   enable_display_power();
+  fs_commit_hold_init(&commit_hold, kHoldMs);
   draw_static();
   flush();
   if (!driver_ok("Initialize", Driver_CDC200.Initialize(display_event))) return false;
@@ -386,6 +492,8 @@ bool fs_display_result(const uint8_t* rgb, char predicted, float confidence,
 }
 
 void fs_display_set_frame(const uint8_t* rgb) { preview = rgb; }
+
+void fs_display_swap_views(void) { crop_main = !crop_main; }
 
 void fs_display_set_detection(const uint16_t* frame565, bool hand, bool fresh, float x0, float y0, float x1,
                               float y1) {
@@ -435,8 +543,14 @@ void fs_ui_render(const fs_decoder_t* d, const fs_metrics_t* m, fs_event_t last_
     std::printf("Display: DSI error event 0x%lx\n", static_cast<unsigned long>(display_errors));
     display_errors = 0;
   }
-  if (preview) blit_crop(preview);
-  blit_inset();
+  if (crop_main) {  // UP on the joystick: the classifier crop large, the camera small
+    if (preview) blit_crop(preview);
+    blit_frame_inset();
+  } else {
+    blit_frame();                           // the camera, with the hand box
+    if (preview && detection_frame) blit_hand_inset(preview);  // what the classifier sees
+  }
+  draw_view_edge();
   draw_landmarks();
 
   // The model's top letter and its probability, green once the decoder holds it above
@@ -462,7 +576,30 @@ void fs_ui_render(const fs_decoder_t* d, const fs_metrics_t* m, fs_event_t last_
                 static_cast<int>(last_ui_ms + 0.5f), static_cast<int>(m->fps + 0.5f));
   metrics_field.set(line, kMuted);
 
-  draw_words(d->text, d->len, last_event == FS_EV_LETTER ? kGreen : kWhite);
+  // The confirmed text is the panel's own copy: a committed letter is held (dimmed) for
+  // kHoldMs and replaced by a letter committed meanwhile. The same 32 kHz clock as the
+  // decoder's now_ms in app_main.cpp (the REFCLK-derived ms would jump every 43 s).
+  const uint32_t now_ms = static_cast<uint32_t>(static_cast<uint64_t>(S32K_CNTRead->CNTCVL) * 1000u / 32768u);
+  const char committed = d->len > 0 ? d->text[d->len - 1] : 0;
+  const bool confirmed = fs_commit_hold_update(&commit_hold, last_event, committed, now_ms);
+  const int reserve = commit_hold.held ? 1 : 0;
+  const int visible = kWordsCols * kWordsRows;
+  const int offset = commit_hold.len + reserve > visible ? commit_hold.len + reserve - visible : 0;
+  const int cell = commit_hold.held ? commit_hold.len - offset : -1;
+  if (cell != held_cell_drawn || commit_hold.held != held_char_drawn) {
+    // The row strings do not change when a held letter appears, moves or goes: repaint the
+    // rows it touched so no dimmed glyph lingers.
+    if (held_cell_drawn >= 0) words_field[held_cell_drawn / kWordsCols].reset();
+    if (cell >= 0) words_field[cell / kWordsCols].reset();
+    held_cell_drawn = cell;
+    held_char_drawn = commit_hold.held;
+  }
+  draw_words(commit_hold.shown, commit_hold.len, confirmed ? kGreen : kWhite, reserve);
+  if (cell >= 0) {  // the dimmed letter, in the cell it will land in (same geometry as Field::set)
+    const char held[2] = {commit_hold.held, '\0'};
+    text(kWordsX + (cell % kWordsCols) * 6 * kWordsScale, kWordsTextY + (cell / kWordsCols) * kWordsRowH, held,
+         kWordsScale, kMuted);
+  }
   flush();
   last_ui_ms = (REFCLK_CNTRead->CNTCVL - t0) * 1000.0f / SystemREFClock;
 }

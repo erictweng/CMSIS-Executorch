@@ -46,8 +46,12 @@ typedef struct {
 static bool g_legacy = true;
 static void init(fs_decoder_t* d) {
   fs_decoder_init(d, NULL);
-  if (!g_legacy) return;
   fs_decoder_cfg_t cfg = d->cfg;
+  cfg.space_ms = 600;  // the automatic space is off by default (space is a button); these tests keep it on
+  if (!g_legacy) {
+    fs_decoder_init(d, &cfg);
+    return;
+  }
   cfg.prob_alpha = 1.0f;
   cfg.commit_threshold = 0.60f;
   cfg.hold_threshold = 0.45f;
@@ -108,7 +112,7 @@ static void test_defaults(void) {
   fs_decoder_init(&d, NULL);
   CHECK(d.cfg.commit_threshold == 0.50f);
   CHECK(d.cfg.commit_frames == 2);
-  CHECK(d.cfg.space_ms == 600);
+  CHECK(d.cfg.space_ms == 0);  // automatic space off: the joystick adds spaces
   CHECK(d.cfg.release_ms == 300);
   CHECK(d.cfg.hold_threshold == 0.40f);
   CHECK(d.cfg.prob_alpha == 0.4f);
@@ -783,7 +787,32 @@ static void test_avg_motion_letters(void) {
   CHECK_STR(&d, "D");
 }
 
+static void test_space_button(void) {
+  fs_decoder_t d;
+  fs_decoder_init(&d, NULL);
+  CHECK(fs_decoder_space(&d) == FS_EV_NONE);  // never leading
+  CHECK(d.len == 0);
+  float probs[FS_CLASSES];
+  uint32_t t = 0;
+  probs_for('H', 0.9f, probs);
+  for (int i = 0; i < 4; ++i) fs_decoder_step(&d, probs, t += 50);
+  CHECK(d.len == 1 && d.text[0] == 'H');
+  CHECK(fs_decoder_space(&d) == FS_EV_SPACE);
+  CHECK_STR(&d, "H ");
+  CHECK(fs_decoder_space(&d) == FS_EV_NONE);  // never doubled
+  CHECK_STR(&d, "H ");
+  // The hand out of view does not add a space with the default cfg (space_ms 0).
+  for (int i = 0; i < FS_CLASSES; ++i) probs[i] = 0.0f;
+  for (int i = 0; i < 40; ++i) fs_decoder_step(&d, probs, t += 50);
+  CHECK_STR(&d, "H ");
+  // The same letter can commit again right after the button (re-armed).
+  probs_for('H', 0.9f, probs);
+  for (int i = 0; i < 4; ++i) fs_decoder_step(&d, probs, t += 50);
+  CHECK_STR(&d, "H H");
+}
+
 int main(void) {
+  test_space_button();
   // The pre-averaging parameters: the per-frame rules as before.
   g_legacy = true;
   test_defaults();

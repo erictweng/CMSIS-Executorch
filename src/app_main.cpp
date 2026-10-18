@@ -557,12 +557,16 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
                                 hand ? hypotf(lm.xyz[9][0] - lm.xyz[0][0], lm.xyz[9][1] - lm.xyz[0][1]) : 0.f};
     fs_event_t event = fs_decoder_step_motion(&decoder, r.probabilities, &motion, now_ms);
 #ifdef FS_HAVE_JOYSTICK
-    {  // DOWN clears the text, LEFT deletes one character; one event per press, clear wins
-      bool down = false, left = false;
-      if (fs_joystick_read(&down, &left)) {
-        const fs_input_event_t in = fs_input_update(&joy, down, left);
+    {  // DOWN clears, LEFT deletes one character, RIGHT adds a space, UP swaps the panel's views
+      bool down = false, left = false, right = false, up = false;
+      if (fs_joystick_read(&down, &left, &right, &up)) {
+        const fs_input_event_t in = fs_input_update(&joy, down, left, right, up);
+#ifdef FINGERSPELL_LCD
+        if (in == FS_INPUT_SWAP_VIEW) fs_display_swap_views();
+#endif
         const fs_event_t edit = in == FS_INPUT_CLEAR       ? fs_decoder_clear(&decoder)
                                 : in == FS_INPUT_BACKSPACE ? fs_decoder_backspace(&decoder)
+                                : in == FS_INPUT_SPACE     ? fs_decoder_space(&decoder)
                                                            : FS_EV_NONE;
         if (edit != FS_EV_NONE) event = edit;
       }
@@ -616,8 +620,9 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
       printf("decoder: %s%c path %.2f text \"%s\"\n", decoder.pending ? "pending " : "committed ",
              decoder.pending ? decoder.pending : decoder.text[decoder.len ? decoder.len - 1 : 0], decoder.pending_path,
              decoder.text);
-    if (event == FS_EV_BACKSPACE || event == FS_EV_CLEAR)
-      printf("decoder: %s text \"%s\"\n", event == FS_EV_CLEAR ? "clear" : "backspace", decoder.text);
+    if (event == FS_EV_BACKSPACE || event == FS_EV_CLEAR || event == FS_EV_SPACE)
+      printf("decoder: %s text \"%s\"\n", event == FS_EV_CLEAR ? "clear" : event == FS_EV_SPACE ? "space" : "backspace",
+             decoder.text);
 #else
     if (hand)
       printf("%c %.2f %c %.2f %c %.2f | box %d,%d %dx%d s%.2f p%.2f | det %.1fms cam %.1fms lm %.1fms | %.1f fps\n",
