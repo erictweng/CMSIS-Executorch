@@ -62,6 +62,10 @@ using executorch::runtime::MemoryAllocator;
 extern "C" {
 volatile uint32_t g_fs_dump_request = 0;
 volatile uint32_t g_fs_loop_frames = 0;  // live-loop iterations (frames through the detector)
+// Per-frame telemetry for the debugger (tests/fs_tools.py read_word): the UART is not always
+// available. Letters as ASCII codes, probabilities and times x1000, path in 1/1000 hand sizes.
+volatile uint32_t g_fs_tele[12] = {0};  // 0 letter 1 prob 2 presence 3 fps 4 det_ms 5 lm_ms 6 box_x 7 box_y 8 box_w
+                                       // 9 pending letter 10 path 11 committed text length
 }
 
 namespace {
@@ -477,6 +481,18 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
              track.score, lm.presence, det_ms, cam_ms, lm_ms, ui_ms, fps);
     else
       printf("no hand | det %.1fms ui %.1fms | %.1f fps\n", det_ms, ui_ms, fps);
+    g_fs_tele[0] = hand ? static_cast<uint32_t>(kLabels[r.top[0]]) : 0u;
+    g_fs_tele[1] = static_cast<uint32_t>(r.prob[0] * 1000.f);
+    g_fs_tele[2] = static_cast<uint32_t>(lm.presence * 1000.f);
+    g_fs_tele[3] = static_cast<uint32_t>(fps * 1000.f);
+    g_fs_tele[4] = static_cast<uint32_t>(det_ms * 1000.f);
+    g_fs_tele[5] = static_cast<uint32_t>(lm_ms * 1000.f);
+    g_fs_tele[6] = static_cast<uint32_t>(static_cast<int>(track.box.x0));
+    g_fs_tele[7] = static_cast<uint32_t>(static_cast<int>(track.box.y0));
+    g_fs_tele[8] = static_cast<uint32_t>(static_cast<int>(track.box.x1 - track.box.x0));
+    g_fs_tele[9] = static_cast<uint32_t>(decoder.pending);
+    g_fs_tele[10] = static_cast<uint32_t>(decoder.pending_path * 1000.f);
+    g_fs_tele[11] = static_cast<uint32_t>(decoder.len);
     if (event == FS_EV_LETTER || (decoder.pending && (g_fs_loop_frames & 7) == 0))
       printf("decoder: %s%c path %.2f text \"%s\"\n", decoder.pending ? "pending " : "committed ",
              decoder.pending ? decoder.pending : decoder.text[decoder.len ? decoder.len - 1 : 0], decoder.pending_path,
