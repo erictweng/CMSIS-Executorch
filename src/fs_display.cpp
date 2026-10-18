@@ -55,9 +55,8 @@ const uint16_t* detection_frame;
 bool detection_hand, detection_fresh;
 float detection_box[4];
 bool landmarks_valid;
-float landmarks_crop[21][2];
+float landmarks_box[4];     // the crop view's hand box in frame pixels
 float landmarks_frame[21][3];
-constexpr int kLandmarkCrop = 224;  // fs_landmark.h FS_LM_SIZE
 // Finger chains for the skeleton: wrist -> MCP -> PIP -> DIP -> tip, plus the palm arc.
 constexpr uint8_t kBones[][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 4}, {0, 5}, {5, 6}, {6, 7}, {7, 8}, {5, 9}, {9, 10},
                                  {10, 11}, {11, 12}, {9, 13}, {13, 14}, {14, 15}, {15, 16}, {13, 17}, {0, 17},
@@ -276,12 +275,16 @@ void line(int x0, int y0, int x1, int y1, uint16_t color) {
 void draw_landmarks() {
   if (!landmarks_valid) return;
   int px[21], py[21];
+  const float side = landmarks_box[2] - landmarks_box[0] > 1.f ? landmarks_box[2] - landmarks_box[0] : 1.f;
   for (int i = 0; i < 21; ++i) {
-    px[i] = kCropX + static_cast<int>(landmarks_crop[i][0] * kCropSize / kLandmarkCrop);
-    py[i] = kCropY + static_cast<int>(landmarks_crop[i][1] * kCropSize / kLandmarkCrop);
+    px[i] = kCropX + static_cast<int>((landmarks_frame[i][0] - landmarks_box[0]) * kCropSize / side);
+    py[i] = kCropY + static_cast<int>((landmarks_frame[i][1] - landmarks_box[1]) * kCropSize / side);
   }
-  for (const auto& b : kBones) line(px[b[0]], py[b[0]], px[b[1]], py[b[1]], kGreen);
-  for (int i = 0; i < 21; ++i) rect(px[i] - 2, py[i] - 2, 5, 5, i == 0 ? kRed : kWhite);
+  auto inside = [](int x, int y) { return x >= kCropX && x < kCropX + kCropSize && y >= kCropY && y < kCropY + kCropSize; };
+  for (const auto& b : kBones)
+    if (inside(px[b[0]], py[b[0]]) && inside(px[b[1]], py[b[1]])) line(px[b[0]], py[b[0]], px[b[1]], py[b[1]], kGreen);
+  for (int i = 0; i < 21; ++i)
+    if (inside(px[i], py[i])) rect(px[i] - 2, py[i] - 2, 5, 5, i == 0 ? kRed : kWhite);
   for (int i = 0; i < 21; ++i) {
     int x = static_cast<int>(landmarks_frame[i][0] / kInsetStep), y = static_cast<int>(landmarks_frame[i][1] / kInsetStep);
     if (x < 0 || y < 0 || x >= kInsetSize || y >= kInsetSize) continue;
@@ -395,14 +398,15 @@ void fs_display_set_detection(const uint16_t* frame565, bool hand, bool fresh, f
   detection_box[3] = y1;
 }
 
-void fs_display_set_landmarks(const float crop_xy[21][2], const float xyz[21][3]) {
-  landmarks_valid = crop_xy != nullptr && xyz != nullptr;
+void fs_display_set_landmarks(const fs_box_t* box, const float xyz[21][3]) {
+  landmarks_valid = box != nullptr && xyz != nullptr;
   if (!landmarks_valid) return;
-  for (int i = 0; i < 21; ++i) {
-    landmarks_crop[i][0] = crop_xy[i][0];
-    landmarks_crop[i][1] = crop_xy[i][1];
+  landmarks_box[0] = box->x0;
+  landmarks_box[1] = box->y0;
+  landmarks_box[2] = box->x1;
+  landmarks_box[3] = box->y1;
+  for (int i = 0; i < 21; ++i)
     for (int c = 0; c < 3; ++c) landmarks_frame[i][c] = xyz[i][c];
-  }
 }
 
 void fs_display_set_top3(const char letters[3], const float probs[3]) {

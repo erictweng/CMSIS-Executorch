@@ -271,6 +271,114 @@ static void test_argmax_tie_takes_lowest_index(void) {
   CHECK(d.live == 'A');
 }
 
+
+// ---- motion letters: D / Z and I / J through fs_decoder_step_motion ---------------------
+
+// Feed `frames` frames of `letter` with the fingertip moving `step` hand sizes per frame
+// (a straight path), advancing *t; hand size 100 px, hand present.
+static events_t feed_motion(fs_decoder_t* d, char letter, float conf, int frames, float step, uint32_t* t,
+                            float* tip) {
+  events_t ev = {0, 0, 0, FS_EV_NONE};
+  float probs[FS_CLASSES];
+  probs_for(letter, conf, probs);
+  for (int i = 0; i < frames; ++i) {
+    tip[0] += step * 100.0f;
+    fs_motion_t m = {true, {tip[0], tip[1]}, {tip[0], tip[1]}, 100.0f};
+    ev.last = fs_decoder_step_motion(d, probs, &m, *t);
+    *t += FRAME_MS;
+    if (ev.last == FS_EV_LETTER) ev.letters++;
+    else if (ev.last == FS_EV_SPACE) ev.spaces++;
+    else ev.none++;
+  }
+  return ev;
+}
+
+static void test_motion_d_held_still_is_d(void) {
+  fs_decoder_t d;
+  fs_decoder_init(&d, NULL);
+  uint32_t t = 0;
+  float tip[2] = {160, 160};
+  events_t ev = feed_motion(&d, 'D', 0.90f, 3, 0.0f, &t, tip);
+  CHECK(ev.last == FS_EV_PENDING);  // not committed yet
+  CHECK(d.pending == 'D' && d.live == 'D');
+  CHECK_STR(&d, "");
+  ev = feed_motion(&d, 'D', 0.90f, 10, 0.02f, &t, tip);  // jitter below the dead band
+  CHECK(ev.letters == 0 && d.pending_path == 0.0f);
+  ev = feed_motion(&d, 'A', 0.20f, 3, 0.0f, &t, tip);  // hand relaxes: resolves on the 3rd frame
+  CHECK(ev.letters == 1);
+  CHECK_STR(&d, "D");
+  CHECK(d.pending == 0);
+}
+
+static void test_motion_d_with_a_stroke_is_z(void) {
+  fs_decoder_t d;
+  fs_decoder_init(&d, NULL);
+  uint32_t t = 0;
+  float tip[2] = {160, 160};
+  feed_motion(&d, 'D', 0.90f, 3, 0.0f, &t, tip);
+  events_t ev = feed_motion(&d, 'D', 0.90f, 6, 0.2f, &t, tip);  // 1.2 hand sizes of travel
+  CHECK(ev.letters == 0 && ev.last == FS_EV_PENDING);
+  CHECK(d.pending_path > 1.0f);
+  ev = sign(&d, 'A', &t);  // moves on to an A: Z resolves at the switch, A commits normally
+  CHECK_STR(&d, "ZA");
+}
+
+static void test_motion_i_with_a_hook_is_j(void) {
+  fs_decoder_t d;
+  fs_decoder_init(&d, NULL);
+  uint32_t t = 0;
+  float tip[2] = {100, 100};
+  feed_motion(&d, 'I', 0.90f, 3, 0.0f, &t, tip);
+  feed_motion(&d, 'I', 0.90f, 8, 0.15f, &t, tip);
+  // The hand disappears: resolves immediately.
+  float probs[FS_CLASSES];
+  probs_for('A', 0.20f, probs);
+  fs_motion_t gone = {false, {0, 0}, {0, 0}, 0};
+  CHECK(fs_decoder_step_motion(&d, probs, &gone, t) == FS_EV_LETTER);
+  CHECK_STR(&d, "J");
+}
+
+static void test_motion_pending_times_out_as_the_still_letter(void) {
+  fs_decoder_t d;
+  fs_decoder_init(&d, NULL);
+  uint32_t t = 0;
+  float tip[2] = {160, 160};
+  feed_motion(&d, 'D', 0.90f, 3, 0.0f, &t, tip);
+  events_t ev = feed_motion(&d, 'D', 0.90f, 60, 0.0f, &t, tip);  // held 2 s
+  CHECK(ev.letters == 1);
+  CHECK_STR(&d, "D");
+  CHECK(d.pending == 0);
+}
+
+static void test_motion_brief_dropout_does_not_end_the_hold(void) {
+  fs_decoder_t d;
+  fs_decoder_init(&d, NULL);
+  uint32_t t = 0;
+  float tip[2] = {160, 160};
+  feed_motion(&d, 'D', 0.90f, 3, 0.0f, &t, tip);
+  feed_motion(&d, 'D', 0.90f, 3, 0.2f, &t, tip);
+  feed_motion(&d, 'U', 0.70f, 2, 0.2f, &t, tip);  // two frames of another shape mid-stroke
+  events_t ev = feed_motion(&d, 'D', 0.90f, 3, 0.2f, &t, tip);
+  CHECK(ev.letters == 0 && d.pending == 'D');
+  feed_motion(&d, 'A', 0.20f, 3, 0.0f, &t, tip);
+  CHECK_STR(&d, "Z");
+}
+
+static void test_motion_other_letters_commit_as_before(void) {
+  fs_decoder_t d;
+  fs_decoder_init(&d, NULL);
+  uint32_t t = 0;
+  float tip[2] = {160, 160};
+  events_t ev = feed_motion(&d, 'B', 0.90f, 3, 0.3f, &t, tip);  // a moving B is still a B
+  CHECK(ev.last == FS_EV_LETTER);
+  CHECK_STR(&d, "B");
+  fs_decoder_init(&d, NULL);
+  t = 0;
+  ev = sign(&d, 'D', &t);  // no motion input: D commits like any letter
+  CHECK(ev.last == FS_EV_LETTER);
+  CHECK_STR(&d, "D");
+}
+
 int main(void) {
   test_defaults();
   test_commit_rule_and_hold();
@@ -285,6 +393,12 @@ int main(void) {
   test_custom_config();
   test_clock_wraparound();
   test_argmax_tie_takes_lowest_index();
+  test_motion_d_held_still_is_d();
+  test_motion_d_with_a_stroke_is_z();
+  test_motion_i_with_a_hook_is_j();
+  test_motion_pending_times_out_as_the_still_letter();
+  test_motion_brief_dropout_does_not_end_the_hold();
+  test_motion_other_letters_commit_as_before();
   printf("fs_decoder: %d checks, %d failed\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

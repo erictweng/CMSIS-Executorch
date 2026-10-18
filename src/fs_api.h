@@ -32,9 +32,25 @@ typedef struct {
   int commit_frames;        // default 3 consecutive frames
   uint32_t space_ms;        // default 1000: no confident letter this long -> space
   uint32_t release_ms;      // default 300: gap needed before the same letter commits again
+  // Motion letters (fs_decoder_step_motion): D and I are held as "pending" until the hand
+  // moves on; the fingertip's path meanwhile decides D vs Z and I vs J.
+  float motion_threshold;   // default 1.0: path length in hand sizes that makes it Z / J
+  float motion_deadband;    // default 0.06: per-frame steps below this (hand sizes) are jitter
+  uint32_t pending_timeout_ms;  // default 1500: a pending letter held this long resolves as is
+  int pending_drop_frames;  // default 3: frames of another/no letter that end the pending hold
 } fs_decoder_cfg_t;
 
-typedef enum { FS_EV_NONE = 0, FS_EV_LETTER, FS_EV_SPACE, FS_EV_BACKSPACE, FS_EV_CLEAR } fs_event_t;
+typedef enum { FS_EV_NONE = 0, FS_EV_LETTER, FS_EV_SPACE, FS_EV_BACKSPACE, FS_EV_CLEAR, FS_EV_PENDING } fs_event_t;
+
+// Per-frame motion input for fs_decoder_step_motion(): fingertips and the hand size in the
+// same units (frame pixels; hand_size = wrist -> middle-finger-MCP distance); valid = false
+// when there is no hand this frame.
+typedef struct {
+  bool valid;
+  float index_tip[2];
+  float pinky_tip[2];
+  float hand_size;
+} fs_motion_t;
 
 typedef struct {
   fs_decoder_cfg_t cfg;
@@ -42,16 +58,27 @@ typedef struct {
   int len;
   char live;                // current top letter (or 0 if below threshold)
   float live_conf;          // its probability
+  char pending;             // 'D' or 'I' held until the hand moves on (0 = none)
+  float pending_path;       // fingertip path so far, in hand sizes
   // private state (implementation detail; zero-initialised by fs_decoder_init)
   char cand, last_committed;
   int streak;
   bool released;
   uint32_t last_conf_ms;
+  uint32_t pending_since_ms;
+  int pending_drop;
+  float last_tip[2];
+  bool last_tip_valid;
 } fs_decoder_t;
 
 void fs_decoder_init(fs_decoder_t* d, const fs_decoder_cfg_t* cfg);  // cfg NULL -> defaults
 // Feed one frame's probabilities. now_ms = monotonic milliseconds. Returns what happened.
 fs_event_t fs_decoder_step(fs_decoder_t* d, const float probs[FS_CLASSES], uint32_t now_ms);
+// The same with the hand's motion: D and I become pending (FS_EV_PENDING) instead of
+// committing, and commit as D / Z or I / J when the signer moves on, times out, or the hand
+// is lost. motion NULL behaves like fs_decoder_step().
+fs_event_t fs_decoder_step_motion(fs_decoder_t* d, const float probs[FS_CLASSES], const fs_motion_t* motion,
+                                  uint32_t now_ms);
 // Button / console input.
 fs_event_t fs_decoder_backspace(fs_decoder_t* d);
 fs_event_t fs_decoder_clear(fs_decoder_t* d);

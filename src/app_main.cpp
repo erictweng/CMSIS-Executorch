@@ -238,7 +238,8 @@ void letters(const fs_landmarks_t& lm, TopK* r) {
   }
 }
 
-// The 128x128 RGB888 preview of the 224x224 int8 landmark crop (nearest neighbour).
+// The 128x128 RGB888 preview of the 224x224 int8 landmark crop (nearest neighbour): the
+// model's rotated input, used for the boot self-test picture.
 void preview_crop(const int8_t* crop, uint8_t* rgb) {
   for (int y = 0; y < kSize; ++y) {
     const int sy = y * FS_LM_SIZE / kSize;
@@ -419,7 +420,7 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     const uint32_t t_frame = cycles();
     fs_detection_t det;
     fs_landmarks_t lm;
-    float crop_xy[FS_LM_COUNT][2];
+    float crop_xy[FS_LM_COUNT][2];  // crop-space landmarks (unused by the display now)
     bool detected = false, hand = false;
     TopK r = {};
     uint32_t t_detected = t_frame, t_cropped = t_frame;
@@ -447,20 +448,25 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     const float det_ms = cycles_ms(t_detected - t_frame);
     const float cam_ms = cycles_ms(t_frame - t0) + (hand || hold ? cycles_ms(t_cropped - t_detected) : 0.f);
     const float lm_ms = hand || hold ? cycles_ms(t_inferred - t_cropped) : 0.f;
-    if (hand) preview_crop(g_landmark_input, g_crop);
+    // The panel shows the camera's view of the hand box (upright, as the signer sees it), not
+    // the rotated model input; the skeleton is drawn from the frame-space landmarks.
+    if (hand) fs_detect_crop(f, &track.box, g_crop);
     const uint32_t t5 = cycles();
 #ifdef FINGERSPELL_LCD
     // The free-running 32 kHz timer keeps milliseconds monotonic across REFCLK wraps. Without
     // a hand the decoder sees all-zero probabilities: no letter, and a space after its idle time.
     const uint32_t now_ms = static_cast<uint32_t>(
         static_cast<uint64_t>(S32K_CNTRead->CNTCVL) * 1000u / 32768u);
-    const fs_event_t event = fs_decoder_step(&decoder, r.probabilities, now_ms);
+    // Fingertips and hand size for the motion letters (Z from D, J from I), frame pixels.
+    const fs_motion_t motion = {hand, {lm.xyz[8][0], lm.xyz[8][1]}, {lm.xyz[20][0], lm.xyz[20][1]},
+                                hand ? hypotf(lm.xyz[9][0] - lm.xyz[0][0], lm.xyz[9][1] - lm.xyz[0][1]) : 0.f};
+    const fs_event_t event = fs_decoder_step_motion(&decoder, r.probabilities, &motion, now_ms);
     const uint32_t t6 = cycles();
     const fs_metrics_t metrics = {fps, cam_ms, det_ms, lm_ms, cycles_ms(t6 - t5), cycles_ms(t6 - t0)};
     const char top3[3] = {hand ? kLabels[r.top[0]] : '\0', hand ? kLabels[r.top[1]] : '\0', hand ? kLabels[r.top[2]] : '\0'};
     fs_display_set_top3(top3, r.prob);
     fs_display_set_detection(f, hand, detected, track.box.x0, track.box.y0, track.box.x1, track.box.y1);
-    fs_display_set_landmarks(hand ? crop_xy : nullptr, hand ? lm.xyz : nullptr);
+    fs_display_set_landmarks(hand ? &track.box : nullptr, hand ? lm.xyz : nullptr);
     fs_ui_render(&decoder, &metrics, event);
     const float ui_ms = cycles_ms(cycles() - t5);
     if (hand)
@@ -471,6 +477,10 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
              track.score, lm.presence, det_ms, cam_ms, lm_ms, ui_ms, fps);
     else
       printf("no hand | det %.1fms ui %.1fms | %.1f fps\n", det_ms, ui_ms, fps);
+    if (event == FS_EV_LETTER || (decoder.pending && (g_fs_loop_frames & 7) == 0))
+      printf("decoder: %s%c path %.2f text \"%s\"\n", decoder.pending ? "pending " : "committed ",
+             decoder.pending ? decoder.pending : decoder.text[decoder.len ? decoder.len - 1 : 0], decoder.pending_path,
+             decoder.text);
 #else
     if (hand)
       printf("%c %.2f %c %.2f %c %.2f | box %d,%d %dx%d s%.2f p%.2f | det %.1fms cam %.1fms lm %.1fms | %.1f fps\n",
