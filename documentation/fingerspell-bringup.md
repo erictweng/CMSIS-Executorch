@@ -257,6 +257,19 @@ confidence is the averaged one; `g_fs_tele[1]` is still the raw MLP top-1 probab
 the signer: drop the hand out of view briefly (0.3-0.6 s) to repeat a letter, longer for a
 space. Host tests: `python3 -m unittest tests.test_decoder_host` (no venv).
 
+Joystick (the DevKit's 5-way stick, the board's only input): DOWN clears the text, LEFT
+deletes one character per press, no auto-repeat. Either edit re-arms the decoder, so the
+letter still being held prints again after `commit_frames` without bouncing the hand, a
+pending D / I is dropped, and no space is inserted until the hand has been in view again
+(so a deleted trailing space does not come straight back). Press -> event logic:
+`src/fs_input.c` (host: `python3 -m unittest tests.test_input_host`). GPIO read:
+`src/fs_joystick.c`, LPGPIO P15_2 (DOWN) and P15_0 (LEFT) through `Driver_GPIO15`, per pin,
+no pinmux touched (boot sets pull-ups and debounce in `gpios.h`; the LCD reset on P15_5 is
+untouched). Boot prints `joystick init OK (down 0 left 0)`; hold a direction while resetting
+to confirm the mapping from those raw values. Each press prints `decoder: backspace` or
+`decoder: clear` with the text. Polled once per frame, so a tap shorter than a frame
+(about 60 ms) can be missed.
+
 ## Next
 
 - S1 camera: capture frames from the DevKit camera, crop the fixed hand box to 128x128

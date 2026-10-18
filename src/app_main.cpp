@@ -50,6 +50,11 @@
 #include "fs_imu.h"
 #define FS_HAVE_IMU 1
 #endif
+#if defined(FINGERSPELL_LCD) && defined(RTE_Drivers_IO)  // the DevKit-E8 joystick edits the text
+#include "fs_input.h"
+#include "fs_joystick.h"
+#define FS_HAVE_JOYSTICK 1
+#endif
 #include "fs_orient.h"
 #include "fs_orient_cal.h"
 
@@ -483,6 +488,10 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
   fs_decoder_init(&decoder, nullptr);
   fs_display_set_frame(g_crop);
 #endif
+#ifdef FS_HAVE_JOYSTICK
+  fs_input_t joy;
+  fs_input_init(&joy);
+#endif
   for (;;) {
     const uint32_t t0 = cycles();
     uint32_t seq = 0;
@@ -546,7 +555,19 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     // Fingertips and hand size for the motion letters (Z from D, J from I), frame pixels.
     const fs_motion_t motion = {hand, {lm.xyz[8][0], lm.xyz[8][1]}, {lm.xyz[20][0], lm.xyz[20][1]},
                                 hand ? hypotf(lm.xyz[9][0] - lm.xyz[0][0], lm.xyz[9][1] - lm.xyz[0][1]) : 0.f};
-    const fs_event_t event = fs_decoder_step_motion(&decoder, r.probabilities, &motion, now_ms);
+    fs_event_t event = fs_decoder_step_motion(&decoder, r.probabilities, &motion, now_ms);
+#ifdef FS_HAVE_JOYSTICK
+    {  // DOWN clears the text, LEFT deletes one character; one event per press, clear wins
+      bool down = false, left = false;
+      if (fs_joystick_read(&down, &left)) {
+        const fs_input_event_t in = fs_input_update(&joy, down, left);
+        const fs_event_t edit = in == FS_INPUT_CLEAR       ? fs_decoder_clear(&decoder)
+                                : in == FS_INPUT_BACKSPACE ? fs_decoder_backspace(&decoder)
+                                                           : FS_EV_NONE;
+        if (edit != FS_EV_NONE) event = edit;
+      }
+    }
+#endif
     const uint32_t t6 = cycles();
     const fs_metrics_t metrics = {fps, cam_ms, det_ms, lm_ms, cycles_ms(t6 - t5), cycles_ms(t6 - t0)};
     const char top3[3] = {hand ? kLabels[r.top[0]] : '\0', hand ? kLabels[r.top[1]] : '\0', hand ? kLabels[r.top[2]] : '\0'};
@@ -595,6 +616,8 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
       printf("decoder: %s%c path %.2f text \"%s\"\n", decoder.pending ? "pending " : "committed ",
              decoder.pending ? decoder.pending : decoder.text[decoder.len ? decoder.len - 1 : 0], decoder.pending_path,
              decoder.text);
+    if (event == FS_EV_BACKSPACE || event == FS_EV_CLEAR)
+      printf("decoder: %s text \"%s\"\n", event == FS_EV_CLEAR ? "clear" : "backspace", decoder.text);
 #else
     if (hand)
       printf("%c %.2f %c %.2f %c %.2f | box %d,%d %dx%d s%.2f p%.2f | det %.1fms cam %.1fms lm %.1fms | %.1f fps\n",
@@ -669,6 +692,9 @@ extern "C" int app_main(void) {
   fs_orient_reset(&g_orient);
   fs_imu_init();
   printf("orient: %s (src/fs_orient_cal.h)\n", FS_ORIENT_CALIBRATED ? "calibrated" : "not calibrated: roll stays 0");
+#endif
+#ifdef FS_HAVE_JOYSTICK
+  fs_joystick_init();  // last: a refusal is the last line printed and costs nothing else
 #endif
   if (camera) {
     printf("core clock %lu Hz\n", static_cast<unsigned long>(SystemCoreClock));

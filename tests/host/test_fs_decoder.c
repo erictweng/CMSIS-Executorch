@@ -258,6 +258,70 @@ static void test_backspace_and_clear(void) {
   CHECK_STR(&d, "B");
 }
 
+static void test_backspace_rearms_the_held_letter(void) {
+  fs_decoder_t d;
+  init(&d);
+  uint32_t t = 0;
+  CHECK(sign(&d, 'A', &t).last == FS_EV_LETTER);
+  CHECK(feed(&d, 'A', 0.90f, 10, &t).letters == 0);  // still held
+  CHECK(fs_decoder_backspace(&d) == FS_EV_BACKSPACE);
+  CHECK_STR(&d, "");
+  events_t ev = feed(&d, 'A', 0.90f, d.cfg.commit_frames, &t);  // no hand bounce needed
+  CHECK(ev.letters == 1);
+  CHECK_STR(&d, "A");
+  CHECK(feed(&d, 'A', 0.90f, 30, &t).letters == 0);  // and once only
+}
+
+static void test_backspace_of_a_trailing_space_is_not_undone_until_the_hand_returns(void) {
+  fs_decoder_t d;
+  init(&d);
+  uint32_t t = 0;
+  sign(&d, 'H', &t);
+  lost(&d, 1100, &t);
+  CHECK_STR(&d, "H ");
+  CHECK(fs_decoder_backspace(&d) == FS_EV_BACKSPACE);
+  CHECK_STR(&d, "H");
+  CHECK(lost(&d, 3000, &t).spaces == 0);  // the hand stays away: the space does not come back
+  CHECK_STR(&d, "H");
+  sign(&d, 'I', &t);
+  CHECK_STR(&d, "HI");
+  CHECK(lost(&d, 1100, &t).spaces == 1);  // a later absence spaces again
+  CHECK_STR(&d, "HI ");
+}
+
+static void test_backspace_of_a_letter_blocks_the_space_too(void) {
+  fs_decoder_t d;
+  init(&d);
+  uint32_t t = 0;
+  sign(&d, 'H', &t);
+  gap(&d, 200, &t);
+  sign(&d, 'I', &t);
+  lost(&d, 200, &t);  // not yet a space
+  CHECK(fs_decoder_backspace(&d) == FS_EV_BACKSPACE);
+  CHECK_STR(&d, "H");
+  CHECK(lost(&d, 2000, &t).spaces == 0);
+  CHECK_STR(&d, "H");
+  sign(&d, 'I', &t);
+  CHECK(lost(&d, 1100, &t).spaces == 1);
+  CHECK_STR(&d, "HI ");
+}
+
+static void test_backspace_on_empty_leaves_the_state_alone(void) {
+  fs_decoder_t d;
+  init(&d);
+  uint32_t t = 0;
+  sign(&d, 'A', &t);
+  lost(&d, 350, &t);
+  sign(&d, 'A', &t);
+  CHECK_STR(&d, "AA");
+  CHECK(fs_decoder_backspace(&d) == FS_EV_BACKSPACE);
+  CHECK(fs_decoder_backspace(&d) == FS_EV_BACKSPACE);
+  CHECK(fs_decoder_backspace(&d) == FS_EV_NONE);
+  CHECK_STR(&d, "");
+  CHECK(feed(&d, 'A', 0.90f, 10, &t).letters == 1);  // re-armed by the real backspaces
+  CHECK_STR(&d, "A");
+}
+
 static void test_full_buffer_drops_oldest(void) {
   fs_decoder_t d;
   init(&d);
@@ -481,6 +545,44 @@ static void test_motion_brief_dropout_does_not_end_the_hold(void) {
   CHECK_STR(&d, "Z");
 }
 
+static void test_clear_drops_a_pending_d(void) {
+  fs_decoder_t d;
+  init(&d);
+  uint32_t t = 0;
+  float tip[2] = {160, 160};
+  feed_motion(&d, 'D', 0.90f, 3, 0.0f, &t, tip);
+  CHECK(d.pending == 'D');
+  CHECK(fs_decoder_clear(&d) == FS_EV_CLEAR);
+  CHECK(d.pending == 0 && d.pending_path == 0.0f);
+  events_t ev = feed_motion(&d, 'A', 0.20f, 5, 0.0f, &t, tip);  // nothing left to resolve
+  CHECK(ev.letters == 0);
+  CHECK_STR(&d, "");
+}
+
+static void test_clear_then_the_held_letter_commits_again(void) {
+  fs_decoder_t d;
+  init(&d);
+  uint32_t t = 0;
+  sign(&d, 'B', &t);
+  feed(&d, 'B', 0.90f, 5, &t);
+  CHECK(fs_decoder_clear(&d) == FS_EV_CLEAR);
+  CHECK_STR(&d, "");
+  CHECK(feed(&d, 'B', 0.90f, d.cfg.commit_frames, &t).letters == 1);
+  CHECK_STR(&d, "B");
+  // A D that already resolved pends again after a clear.
+  init(&d);
+  t = 0;
+  float tip[2] = {160, 160};
+  feed_motion(&d, 'D', 0.90f, 3, 0.0f, &t, tip);
+  feed_motion(&d, 'A', 0.20f, 3, 0.0f, &t, tip);  // the hand relaxes: D
+  CHECK_STR(&d, "D");
+  CHECK(fs_decoder_clear(&d) == FS_EV_CLEAR);
+  events_t ev = feed_motion(&d, 'D', 0.90f, 3, 0.0f, &t, tip);
+  CHECK(ev.last == FS_EV_PENDING && d.pending == 'D');
+  feed_motion(&d, 'A', 0.20f, 3, 0.0f, &t, tip);
+  CHECK_STR(&d, "D");
+}
+
 static void test_motion_other_letters_commit_as_before(void) {
   fs_decoder_t d;
   init(&d);
@@ -693,6 +795,10 @@ int main(void) {
   test_hi_mom_space();
   test_no_space_before_any_text();
   test_backspace_and_clear();
+  test_backspace_rearms_the_held_letter();
+  test_backspace_of_a_trailing_space_is_not_undone_until_the_hand_returns();
+  test_backspace_of_a_letter_blocks_the_space_too();
+  test_backspace_on_empty_leaves_the_state_alone();
   test_full_buffer_drops_oldest();
   test_custom_config();
   test_clock_wraparound();
@@ -704,6 +810,8 @@ int main(void) {
   test_motion_i_with_a_hook_is_j();
   test_motion_pending_times_out_as_the_still_letter();
   test_motion_brief_dropout_does_not_end_the_hold();
+  test_clear_drops_a_pending_d();
+  test_clear_then_the_held_letter_commits_again();
   test_motion_other_letters_commit_as_before();
   // The defaults: averaging on.
   g_legacy = false;

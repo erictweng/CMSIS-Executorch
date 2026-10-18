@@ -61,6 +61,14 @@ project:
         # Decoder (fs_api.h): per-frame letter probabilities to text. Pure C99, no
         # hardware, for every target; host tests in tests/host/test_fs_decoder.c.
         - file: ./src/fs_decoder.c
+        # Joystick edits (DOWN clears, LEFT deletes one character): the press -> event logic
+        # is pure C99 for every target, host tests in tests/host/test_fs_input.c; the LPGPIO
+        # read is DevKit-E8 only.
+        - file: ./src/fs_input.c
+        - file: ./src/fs_input.h
+        - file: ./src/fs_joystick.c
+          for-context: +DevKit-E8
+        - file: ./src/fs_joystick.h
 
   layers:
     - layer: $Board-Layer$

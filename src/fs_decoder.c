@@ -17,6 +17,8 @@
 //            (a confidence dip never re-arms it), so "LL" is signed by bouncing the hand
 //   space    the hand out of view for >= space_ms inserts one space; a pause with the hand
 //            in view never does (slow signing must not break a word)
+//   buttons  backspace / clear re-arm the decoder: the held letter commits again, a pending
+//            D / I is dropped, and the space rule waits until the hand is next in view
 //   text     oldest characters drop off when the buffer is full
 //   motion   (fs_decoder_step_motion) D and I are the static shapes of Z and J, which are
 //            drawn in the air; instead of committing, they become pending and the fingertip
@@ -120,7 +122,10 @@ fs_event_t fs_decoder_step_motion(fs_decoder_t* d, const float probs[FS_CLASSES]
   for (int i = 0; i < FS_CLASSES; ++i) sum += probs[i];
   const bool hand = (motion == NULL || motion->valid) && sum >= 0.5f;
   if (!hand && now_ms - d->last_hand_ms >= d->cfg.release_ms) d->released = true;
-  if (hand) d->last_hand_ms = now_ms;
+  if (hand) {
+    d->last_hand_ms = now_ms;
+    d->space_blocked = false;
+  }
 
   const float* p = average(d, probs, hand);
   int top = 0;
@@ -174,7 +179,8 @@ fs_event_t fs_decoder_step_motion(fs_decoder_t* d, const float probs[FS_CLASSES]
     d->cand = 0;
     d->streak = 0;
     if (resolved != FS_EV_NONE) return resolved;
-    if (!hand && d->len > 0 && d->text[d->len - 1] != ' ' && now_ms - d->last_hand_ms >= d->cfg.space_ms) {
+    if (!hand && !d->space_blocked && d->len > 0 && d->text[d->len - 1] != ' ' &&
+        now_ms - d->last_hand_ms >= d->cfg.space_ms) {
       append(d, ' ');
       return FS_EV_SPACE;
     }
@@ -206,14 +212,29 @@ fs_event_t fs_decoder_step_motion(fs_decoder_t* d, const float probs[FS_CLASSES]
   return ev != FS_EV_NONE ? ev : resolved;
 }
 
+// After a button edit the signer keeps holding the shape: let it commit again, forget a
+// pending D / I, and hold the space rule until the hand is next seen.
+static void rearm(fs_decoder_t* d) {
+  d->cand = 0;
+  d->streak = 0;
+  d->released = true;
+  d->pending = 0;
+  d->pending_path = 0.0f;
+  d->pending_drop = 0;
+  d->start_tip_valid = false;
+  d->space_blocked = true;
+}
+
 fs_event_t fs_decoder_backspace(fs_decoder_t* d) {
   if (d->len == 0) return FS_EV_NONE;
   d->text[--d->len] = '\0';
+  rearm(d);
   return FS_EV_BACKSPACE;
 }
 
 fs_event_t fs_decoder_clear(fs_decoder_t* d) {
   d->len = 0;
   d->text[0] = '\0';
+  rearm(d);
   return FS_EV_CLEAR;
 }

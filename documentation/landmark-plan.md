@@ -222,3 +222,11 @@ loop >= 12 fps; otherwise ship `detect/blazepalm` + the data route for the demo.
   `commit_frames` 2. The legacy decoder tests pin the old parameters explicitly; 311 checks
   green. To measure: HELLO and HI MOM with a deliberate drop between words, and whether
   transitions leave stray letters at 0.50 / 2 frames (if so, `commit_frames` 3 first).
+- 2026-10-18 (joystick): **DOWN clears, LEFT deletes one character; built, not flashed.**
+  `src/fs_input.c` (edge detector, one event per press, first sample never fires; host
+  tests `tests/test_input_host.py`) and `src/fs_joystick.c` (LPGPIO P15_2 / P15_0 through
+  `Driver_GPIO15`, per pin, no pinmux). The decoder re-arms on either edit (`rearm()`: the
+  held letter commits again, a pending D / I is dropped, `space_blocked` holds the space rule
+  until the hand is next seen). Decoder host suite 352 checks green. Board check pending:
+  the `joystick init OK` line, the LEFT / DOWN mapping, and that the LCD reset on the same
+  port is unaffected.
