@@ -181,6 +181,22 @@ warm reset).
 detector-geometry crops (section 7 of `documentation/hand-detection-handoff.md`). The
 detector's calibration uses dataset crops until `model/calib_detect_192.npy` exists.
 
+## Landmarks (branch `landmark/pipeline`)
+
+The pixel classifier is replaced by MediaPipe's hand landmark model and a keypoint MLP:
+`detect` (BlazePalm) -> rotated 2.6x palm crop, fingers up (224x224 int8) -> `landmark`
+(hand_landmark_lite, int8 in/out, 146 M MACs, one Ethos-U delegate) -> 21 landmarks ->
+wrist-centred, size-normalised, left-mirrored features -> MLP 63-128-24 on the CPU -> the
+decoder. Background, lighting and skin never reach the letter decision. Plan, decisions and
+status: `documentation/landmark-plan.md`; reference `ml/handlandmark.py`; board code
+`src/fs_landmark.c`; tests `tests/test_landmark.py` (host) and `tests/test_detector.py`
+(board, the live lines now carry `p<presence>` and `lm <ms>`).
+
+Numbers so far (host): exported graph vs TFLite 2e-4 px; int8 vs float landmarks 0.8 px
+median / 4.2 px p90 on the crop, presence agreement 96 %; MLP 95.8 % on held-out Marxulia
+landmarks (MediaPipe's pipeline); program 2,265,152 bytes; Vela scratch 1185 KiB (temp pool
+1.5 MB); DevKit image MRAM 2.57 of 3.44 MB, SRAM0 3.82 of 3.94 MB. Board numbers: pending.
+
 ## Next
 
 - S1 camera: capture frames from the DevKit camera, crop the fixed hand box to 128x128

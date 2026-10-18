@@ -30,10 +30,6 @@
 #define RTE_TIMEOUT      1
 /* ARM::Machine Learning:NPU Support:Ethos-U Driver&Generic U85@1.26.5 */
 #define RTE_ETHOS_U_CORE_DRIVER
-/* PyTorch::Machine Learning:ExecuTorch Operators:Quantized dequantize@1.5.1 */
-#define RTE_ML_EXECUTORCH_OP_QUANTIZED_DEQUANTIZE     /* ExecuTorch op_dequantize */
-/* PyTorch::Machine Learning:ExecuTorch Operators:Quantized quantize@1.5.1 */
-#define RTE_ML_EXECUTORCH_OP_QUANTIZED_QUANTIZE     /* ExecuTorch op_quantize */
 /* PyTorch::Machine Learning:ExecuTorch:Backend EthosU@1.5.1 */
 #define RTE_ML_EXECUTORCH_BACKEND_ETHOS_U     /* ExecuTorch Ethos-U Backend (Cortex-M host) */
 /* PyTorch::Machine Learning:ExecuTorch:Kernel Registration@1.5.1 */
