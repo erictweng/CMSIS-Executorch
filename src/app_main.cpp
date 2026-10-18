@@ -226,11 +226,16 @@ struct TopK {
   float probabilities[kClasses];  // every class, for the decoder
 };
 
-// Letter probabilities from the landmarks through the MLP; top-3.
+// Letter probabilities from the landmarks through the MLP; top-3. The features are averaged
+// over frames (fs_landmark_smooth) so the letter and its confidence do not jitter; the
+// average restarts whenever the hand was lost (letters_reset).
+fs_lm_smooth_t g_smooth = {{0}, false};
+void letters_reset() { fs_landmark_smooth_reset(&g_smooth); }
 void letters(const fs_landmarks_t& lm, TopK* r) {
-  float f[FS_LM_FEATURES];
+  float f[FS_LM_FEATURES], fs[FS_LM_FEATURES];
   fs_landmark_features(&lm, f);
-  fs_landmark_letters(f, &FS_MLP_W1[0][0], FS_MLP_B1, &FS_MLP_W2[0][0], FS_MLP_B2, FS_MLP_HIDDEN, r->probabilities);
+  fs_landmark_smooth(&g_smooth, f, FS_LM_SMOOTH, fs);
+  fs_landmark_letters(fs, &FS_MLP_W1[0][0], FS_MLP_B1, &FS_MLP_W2[0][0], FS_MLP_B2, FS_MLP_HIDDEN, r->probabilities);
   int top[3] = {-1, -1, -1};
   for (int k = 0; k < 3; ++k)
     for (int i = 0; i < kClasses; ++i)
@@ -265,12 +270,18 @@ bool infer(EmbeddedModule& module, const uint16_t* frame, bool hold, fs_detectio
   if (!detect(module, det, detected)) return false;
   if (t_detected) *t_detected = cycles();
   *hand = false;
-  if (!*detected && !hold) return true;
+  if (!*detected && !hold) {
+    letters_reset();
+    return true;
+  }
   if (*detected) *crop = fs_landmark_crop_frame(det, kInputToFrame);
   fs_landmark_crop(frame, crop, g_landmark_input, kLandmarkInput);
   if (t_cropped) *t_cropped = cycles();
   if (!landmark(module, crop, lm, crop_xy)) return false;
-  if (lm->presence < FS_LM_PRESENCE) return true;
+  if (lm->presence < FS_LM_PRESENCE) {
+    letters_reset();
+    return true;
+  }
   *hand = true;
   letters(*lm, r);
   return true;
@@ -407,6 +418,7 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
   fs_track_t track;
   fs_track_reset(&track);
   fs_lm_crop_t crop = {kFrame / 2.f, kFrame / 2.f, 256.f, 1.f, 0.f, 0.f, 1.f};
+  letters_reset();
 #ifdef FINGERSPELL_LCD
   fs_decoder_t decoder;
   fs_decoder_init(&decoder, nullptr);
@@ -547,6 +559,7 @@ extern "C" int app_main(void) {
            kLabels[r.top[1]], r.prob[1], kLabels[r.top[2]], r.prob[2], kTestExpected);
   else
     printf("Top-3: none (no hand in the test crop)   (expected %c)\n", kTestExpected);
+  letters_reset();
   if (!infer(module, frame, true, &det, &detected, &crop, &lm, crop_xy, &hand2, &r2, nullptr, nullptr)) return 1;
   const bool repeat_ok = hand2 == hand && (!hand || r2.top[0] == r.top[0]);
   printf("Repeat run: %s\n", repeat_ok ? "same top-1" : "FAILED");

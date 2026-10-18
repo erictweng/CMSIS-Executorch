@@ -156,3 +156,8 @@ loop >= 12 fps; otherwise ship `detect/blazepalm` + the data route for the demo.
   reads the live state over J-Link instead. Letter accuracy on real hands not yet scored (no
   signer at the board during the run); the MLP is still the MediaPipe-landmark one, the
   board-pipeline landmark extraction for retraining is at 7,000 / 10,873 images.
+- 2026-10-17 23:50: MLP retrained on MediaPipe landmarks + landmarks through the board's own
+  pipeline (`model/keypoints_marxulia_board.npz`, 8,115 hands): held-out 96.6 % / **94.5 %**
+  (was 90.5 % on the board-pipeline set with the MediaPipe-only MLP). Features are averaged
+  over frames before the MLP (`fs_landmark_smooth`, weight 0.5, reset when the hand is lost).
+  Image built with the new weights; flash pending (the board dropped off USB again).

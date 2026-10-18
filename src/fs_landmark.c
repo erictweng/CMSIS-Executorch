@@ -115,6 +115,18 @@ void fs_landmark_features(const fs_landmarks_t* lm, float f[FS_LM_FEATURES]) {
   }
 }
 
+void fs_landmark_smooth_reset(fs_lm_smooth_t* s) { s->valid = false; }
+
+void fs_landmark_smooth(fs_lm_smooth_t* s, const float f[FS_LM_FEATURES], float alpha, float out[FS_LM_FEATURES]) {
+  if (!s->valid) {
+    memcpy(s->f, f, sizeof(s->f));
+    s->valid = true;
+  } else {
+    for (int i = 0; i < FS_LM_FEATURES; ++i) s->f[i] += alpha * (f[i] - s->f[i]);
+  }
+  memcpy(out, s->f, sizeof(s->f));
+}
+
 void fs_landmark_letters(const float f[FS_LM_FEATURES], const float* W1, const float* b1, const float* W2,
                          const float* b2, int hidden, float probs[FS_CLASSES]) {
   float h[256];

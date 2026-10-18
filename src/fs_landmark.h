@@ -53,6 +53,16 @@ void fs_landmark_decode(const int8_t lm63[FS_LM_FEATURES], fs_quant_t lq, int8_t
 // MLP inputs: wrist at the origin, wrist -> middle-MCP distance = 1, left hands mirrored.
 void fs_landmark_features(const fs_landmarks_t* lm, float f[FS_LM_FEATURES]);
 
+// Temporal average of the MLP features across frames (exponential, weight FS_LM_SMOOTH on the
+// new frame): steadier letters and confidences. Reset it when the hand is lost.
+#define FS_LM_SMOOTH 0.5f
+typedef struct {
+  float f[FS_LM_FEATURES];
+  bool valid;
+} fs_lm_smooth_t;
+void fs_landmark_smooth_reset(fs_lm_smooth_t* s);
+void fs_landmark_smooth(fs_lm_smooth_t* s, const float f[FS_LM_FEATURES], float alpha, float out[FS_LM_FEATURES]);
+
 // Letter probabilities from the MLP (W1 hidden x 63, b1 hidden, W2 FS_CLASSES x hidden, b2).
 void fs_landmark_letters(const float f[FS_LM_FEATURES], const float* W1, const float* b1, const float* W2,
                          const float* b2, int hidden, float probs[FS_CLASSES]);
