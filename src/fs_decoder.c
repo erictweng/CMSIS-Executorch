@@ -15,10 +15,12 @@
 //            count toward commit_frames, and they count as confident for the space timer
 //   release  the same letter commits again only after the hand was lost for >= release_ms
 //            (a confidence dip never re-arms it), so "LL" is signed by bouncing the hand
-//   space    the hand out of view for >= space_ms inserts one space; a pause with the hand
-//            in view never does (slow signing must not break a word)
-//   buttons  backspace / clear re-arm the decoder: the held letter commits again, a pending
-//            D / I is dropped, and the space rule waits until the hand is next in view
+//   space    the joystick (fs_decoder_space) adds one space; the automatic space on the hand
+//            out of view for >= space_ms is off by default (space_ms 0): taking the hand away
+//            was too inconsistent for the demo. With space_ms set, a pause with the hand in
+//            view still never makes one (slow signing must not break a word)
+//   buttons  space / backspace / clear re-arm the decoder: the held letter commits again, a
+//            pending D / I is dropped, and the space rule waits until the hand is next in view
 //   text     oldest characters drop off when the buffer is full
 //   motion   (fs_decoder_step_motion) D and I are the static shapes of Z and J, which are
 //            drawn in the air; instead of committing, they become pending and the fingertip
@@ -37,7 +39,7 @@
 
 static const fs_decoder_cfg_t kDefaultCfg = {
     .commit_threshold = 0.50f, .hold_threshold = 0.40f, .prob_alpha = 0.4f, .commit_frames = 2,
-    .space_ms = 600, .release_ms = 300,
+    .space_ms = 0, .release_ms = 300,
     .motion_threshold = 1.0f, .motion_deadband = 0.06f, .pending_timeout_ms = 1500, .pending_drop_frames = 3};
 
 static void append(fs_decoder_t* d, char c) {
@@ -179,7 +181,7 @@ fs_event_t fs_decoder_step_motion(fs_decoder_t* d, const float probs[FS_CLASSES]
     d->cand = 0;
     d->streak = 0;
     if (resolved != FS_EV_NONE) return resolved;
-    if (!hand && !d->space_blocked && d->len > 0 && d->text[d->len - 1] != ' ' &&
+    if (!hand && d->cfg.space_ms > 0 && !d->space_blocked && d->len > 0 && d->text[d->len - 1] != ' ' &&
         now_ms - d->last_hand_ms >= d->cfg.space_ms) {
       append(d, ' ');
       return FS_EV_SPACE;
@@ -223,6 +225,13 @@ static void rearm(fs_decoder_t* d) {
   d->pending_drop = 0;
   d->start_tip_valid = false;
   d->space_blocked = true;
+}
+
+fs_event_t fs_decoder_space(fs_decoder_t* d) {
+  if (d->len == 0 || d->text[d->len - 1] == ' ') return FS_EV_NONE;  // never leading or doubled
+  append(d, ' ');
+  rearm(d);
+  return FS_EV_SPACE;
 }
 
 fs_event_t fs_decoder_backspace(fs_decoder_t* d) {

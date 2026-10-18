@@ -222,6 +222,13 @@ loop >= 12 fps; otherwise ship `detect/blazepalm` + the data route for the demo.
   `commit_frames` 2. The legacy decoder tests pin the old parameters explicitly; 311 checks
   green. To measure: HELLO and HI MOM with a deliberate drop between words, and whether
   transitions leave stray letters at 0.50 / 2 frames (if so, `commit_frames` 3 first).
+- 2026-10-18 (demo prep, later): **space is a joystick button; the hand-out-of-view space is
+  off.** Taking the hand away was too inconsistent to present: joystick RIGHT (JOY_SW_D,
+  P15_3) calls `fs_decoder_space()` (one space, never leading or doubled, re-arms the decoder
+  like backspace); `space_ms` defaults to 0 = off, and the old rule still works when it is set
+  (the decoder tests set 600/1000 explicitly). The panel also holds each newly committed
+  letter 0.7 s before it joins the confirmed line, and a letter committed meanwhile replaces
+  it (`src/fs_commit_hold.c`), so a wrong letter corrected within the hold never shows.
 - 2026-10-18 (joystick): **DOWN clears, LEFT deletes one character; built, not flashed.**
   `src/fs_input.c` (edge detector, one event per press, first sample never fires; host
   tests `tests/test_input_host.py`) and `src/fs_joystick.c` (LPGPIO P15_2 / P15_0 through
