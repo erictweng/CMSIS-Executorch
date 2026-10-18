@@ -186,6 +186,8 @@ After **Create AI layer**, rebuild and flash.
 
 ## Read on
 
+- [documentation/how-it-works.md](documentation/how-it-works.md): one frame
+  through the code, stage by stage, with the file for each.
 - [documentation/landmark-plan.md](documentation/landmark-plan.md): the
   pipeline design, decisions and a dated status log.
 - [documentation/fingerspell-bringup.md](documentation/fingerspell-bringup.md):

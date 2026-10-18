@@ -98,8 +98,8 @@ views.
 
 - MRAM: the program with both models is about 2.5 MB in a 3.4 MB code region.
 - SRAM0 (4 MB, the only bulk SRAM the NPU reaches), above the 64 kB boot stub: the camera
-  ring (0.6 MB), the model's method and temp pools (NPU scratch), the LCD frame buffer
-  (0.75 MB). SRAM1 is unused.
+  ring (0.6 MB), the model's method pool (1 MB) and temp pool (1.5 MB, the NPU scratch of
+  both methods), the LCD frame buffer (0.75 MB). SRAM1 is unused.
 - Per frame: detector ~23 ms, landmarks ~6 ms, decoder and panel ~3 ms; 15-18 fps with a
   hand in view. The timings use the SoC's 100 MHz REFCLK counter (the M55's cycle counter
   only runs with a debugger attached).
