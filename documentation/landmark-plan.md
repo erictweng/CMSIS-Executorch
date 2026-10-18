@@ -148,3 +148,11 @@ loop >= 12 fps; otherwise ship `detect/blazepalm` + the data route for the demo.
   run on the board (USB dropped). Open: the lite model on a tight unrotated crop gives
   different landmarks than MediaPipe's pipeline; `ml/keypoint_dataset_board.py` extracts
   training landmarks through the board's own pipeline so the MLP sees what the board sees.
+- 2026-10-17 23:20: **runs on the board.** Live loop at 15-16 fps with a hand (detector stage
+  22.9 ms unchanged, landmark stage **6.0 ms** for crop + model + decode + MLP), presence
+  0.96-0.99 on a real hand. Motion letters Z / J are in the decoder (pending-state rule, host-
+  tested; commit `9133ff96`), the panel shows the upright hand box with the skeleton. The UART
+  has been dead since a USB reconnect (the loop runs, J-Link works); `tests/board_telemetry.py`
+  reads the live state over J-Link instead. Letter accuracy on real hands not yet scored (no
+  signer at the board during the run); the MLP is still the MediaPipe-landmark one, the
+  board-pipeline landmark extraction for retraining is at 7,000 / 10,873 images.
