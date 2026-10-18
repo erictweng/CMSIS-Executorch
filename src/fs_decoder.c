@@ -15,7 +15,8 @@
 //            count toward commit_frames, and they count as confident for the space timer
 //   release  the same letter commits again only after the hand was lost for >= release_ms
 //            (a confidence dip never re-arms it), so "LL" is signed by bouncing the hand
-//   space    a gap of >= space_ms with no confident letter inserts one space
+//   space    the hand out of view for >= space_ms inserts one space; a pause with the hand
+//            in view never does (slow signing must not break a word)
 //   text     oldest characters drop off when the buffer is full
 //   motion   (fs_decoder_step_motion) D and I are the static shapes of Z and J, which are
 //            drawn in the air; instead of committing, they become pending and the fingertip
@@ -33,8 +34,8 @@
 #include "fs_api.h"
 
 static const fs_decoder_cfg_t kDefaultCfg = {
-    .commit_threshold = 0.60f, .hold_threshold = 0.45f, .prob_alpha = 0.4f, .commit_frames = 3,
-    .space_ms = 1000, .release_ms = 300,
+    .commit_threshold = 0.50f, .hold_threshold = 0.40f, .prob_alpha = 0.4f, .commit_frames = 2,
+    .space_ms = 600, .release_ms = 300,
     .motion_threshold = 1.0f, .motion_deadband = 0.06f, .pending_timeout_ms = 1500, .pending_drop_frames = 3};
 
 static void append(fs_decoder_t* d, char c) {
@@ -126,9 +127,9 @@ fs_event_t fs_decoder_step_motion(fs_decoder_t* d, const float probs[FS_CLASSES]
   for (int i = 1; i < FS_CLASSES; ++i)
     if (p[i] > p[top]) top = i;
   float conf = p[top];
-  const bool above = conf >= d->cfg.commit_threshold;
+  const bool above = hand && conf >= d->cfg.commit_threshold;
   bool confident = above;
-  if (!confident && d->cand) {  // hysteresis: the candidate holds on down to hold_threshold
+  if (!confident && hand && d->cand) {  // hysteresis: the candidate holds on down to hold_threshold
     const int ci = (int)(strchr(FS_LABELS, d->cand) - FS_LABELS);
     if (p[ci] >= d->cfg.hold_threshold) {
       top = ci;
@@ -153,7 +154,6 @@ fs_event_t fs_decoder_step_motion(fs_decoder_t* d, const float probs[FS_CLASSES]
       accumulate(d, motion);
       if (d->pending_path >= d->cfg.motion_threshold) {  // the stroke is drawn: Z / J now
         d->live = d->pending;
-        d->last_conf_ms = now_ms;
         d->cand = d->pending;  // the still shape continues; its streak must not re-pend it
         d->streak = d->cfg.commit_frames + 1;
         return resolve_pending(d);
@@ -165,7 +165,6 @@ fs_event_t fs_decoder_step_motion(fs_decoder_t* d, const float probs[FS_CLASSES]
                          now_ms - d->pending_since_ms >= d->cfg.pending_timeout_ms;
     if (!resolve && (same || !confident)) {
       d->live = d->pending;  // shown while pending
-      if (confident) d->last_conf_ms = now_ms;
       return FS_EV_PENDING;
     }
     if (resolve) resolved = resolve_pending(d);
@@ -175,14 +174,12 @@ fs_event_t fs_decoder_step_motion(fs_decoder_t* d, const float probs[FS_CLASSES]
     d->cand = 0;
     d->streak = 0;
     if (resolved != FS_EV_NONE) return resolved;
-    if (d->len > 0 && d->text[d->len - 1] != ' ' && now_ms - d->last_conf_ms >= d->cfg.space_ms) {
+    if (!hand && d->len > 0 && d->text[d->len - 1] != ' ' && now_ms - d->last_hand_ms >= d->cfg.space_ms) {
       append(d, ' ');
       return FS_EV_SPACE;
     }
     return FS_EV_NONE;
   }
-
-  d->last_conf_ms = now_ms;
 
   const char letter = FS_LABELS[top];
   if (letter != d->cand) {

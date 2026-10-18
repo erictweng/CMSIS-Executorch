@@ -1,9 +1,10 @@
 // Host tests for src/fs_decoder.c against the fs_api.h decoder contract. Feeds synthetic
 // probability streams at 30 fps; recorded webcam.py streams can replace them later.
 //
-// The first block of tests predates the temporal averaging and runs with prob_alpha 1.0
-// (averaging off: the regression guard for the per-frame rules); the "avg_" tests run the
-// defaults (0.4). The hand-loss repeat rule applies to both.
+// The first block of tests predates the temporal averaging and runs with its parameters
+// (prob_alpha 1.0 = averaging off, commit 0.60 for 3 frames, hold 0.45, space 1000 ms): the
+// regression guard for the per-frame rules. The "avg_" tests run the defaults. The hand-loss
+// repeat rule and the hand-out-of-view space apply to both.
 //
 //   clang -std=c99 -Wall -Wextra -Werror -pedantic -I src src/fs_decoder.c \
 //         tests/host/test_fs_decoder.c -o /tmp/test_fs_decoder && /tmp/test_fs_decoder
@@ -41,12 +42,17 @@ typedef struct {
   fs_event_t last;
 } events_t;
 
-// Defaults with the probability average set to g_alpha (1.0 = off).
-static float g_alpha = 1.0f;
+// The defaults, or the pre-averaging parameters when g_legacy is set.
+static bool g_legacy = true;
 static void init(fs_decoder_t* d) {
   fs_decoder_init(d, NULL);
+  if (!g_legacy) return;
   fs_decoder_cfg_t cfg = d->cfg;
-  cfg.prob_alpha = g_alpha;
+  cfg.prob_alpha = 1.0f;
+  cfg.commit_threshold = 0.60f;
+  cfg.hold_threshold = 0.45f;
+  cfg.commit_frames = 3;
+  cfg.space_ms = 1000;
   fs_decoder_init(d, &cfg);
 }
 
@@ -100,11 +106,11 @@ static events_t sign(fs_decoder_t* d, char letter, uint32_t* t) {
 static void test_defaults(void) {
   fs_decoder_t d;
   fs_decoder_init(&d, NULL);
-  CHECK(d.cfg.commit_threshold == 0.60f);
-  CHECK(d.cfg.commit_frames == 3);
-  CHECK(d.cfg.space_ms == 1000);
+  CHECK(d.cfg.commit_threshold == 0.50f);
+  CHECK(d.cfg.commit_frames == 2);
+  CHECK(d.cfg.space_ms == 600);
   CHECK(d.cfg.release_ms == 300);
-  CHECK(d.cfg.hold_threshold == 0.45f);
+  CHECK(d.cfg.hold_threshold == 0.40f);
   CHECK(d.cfg.prob_alpha == 0.4f);
   CHECK(d.len == 0 && d.text[0] == '\0' && d.live == 0);
 }
@@ -199,12 +205,15 @@ static void test_hi_mom_space(void) {
   sign(&d, 'I', &t);
   CHECK_STR(&d, "HI");
 
-  events_t ev = gap(&d, 990, &t);  // just under space_ms since the last confident frame
+  events_t ev = gap(&d, 3000, &t);  // a pause with the hand in view is never a space
   CHECK(ev.spaces == 0);
-  ev = gap(&d, 100, &t);
+  CHECK_STR(&d, "HI");
+  ev = lost(&d, 990, &t);  // just under space_ms without a hand
+  CHECK(ev.spaces == 0);
+  ev = lost(&d, 100, &t);
   CHECK(ev.spaces == 1);
   CHECK_STR(&d, "HI ");
-  ev = gap(&d, 3000, &t);  // one space per pause, however long
+  ev = lost(&d, 3000, &t);  // one space per absence, however long
   CHECK(ev.spaces == 0);
   CHECK_STR(&d, "HI ");
 
@@ -220,7 +229,7 @@ static void test_no_space_before_any_text(void) {
   fs_decoder_t d;
   init(&d);
   uint32_t t = 5000;  // the clock need not start at zero
-  events_t ev = gap(&d, 4000, &t);
+  events_t ev = lost(&d, 4000, &t);
   CHECK(ev.spaces == 0 && ev.letters == 0);
   CHECK_STR(&d, "");
 }
@@ -232,7 +241,7 @@ static void test_backspace_and_clear(void) {
   sign(&d, 'H', &t);
   gap(&d, 200, &t);
   sign(&d, 'I', &t);
-  gap(&d, 1100, &t);
+  lost(&d, 1100, &t);
   CHECK_STR(&d, "HI ");
   CHECK(fs_decoder_backspace(&d) == FS_EV_BACKSPACE);
   CHECK_STR(&d, "HI");
@@ -274,7 +283,7 @@ static void test_custom_config(void) {
   uint32_t t = 0;
   CHECK(feed(&d, 'K', 0.79f, 1, &t).last == FS_EV_NONE);
   CHECK(feed(&d, 'K', 0.81f, 1, &t).last == FS_EV_LETTER);
-  CHECK(gap(&d, 500, &t).spaces == 1);
+  CHECK(lost(&d, 500, &t).spaces == 1);
   CHECK_STR(&d, "K ");
   CHECK(d.cfg.prob_alpha == 1.0f);            // unset: no averaging
   CHECK(d.cfg.hold_threshold == 0.80f);       // unset: no hysteresis
@@ -503,7 +512,7 @@ static void test_avg_held_letter_with_dips_commits_once(void) {
   }
   CHECK(total.letters == 1 && total.spaces == 0);
   CHECK_STR(&d, "B");
-  CHECK(d.live == 'B' && d.live_conf > 0.45f);
+  CHECK(d.live == 'B' && d.live_conf > 0.40f);
 }
 
 static void test_avg_flicker_commits_nothing(void) {
@@ -511,8 +520,8 @@ static void test_avg_flicker_commits_nothing(void) {
   init(&d);
   uint32_t t = 0;
   float ab[FS_CLASSES] = {0}, ba[FS_CLASSES] = {0};
-  ab[0] = 0.55f; ab[1] = 0.45f;  // A over B
-  ba[0] = 0.45f; ba[1] = 0.55f;  // B over A
+  ab[0] = 0.48f; ab[1] = 0.40f;  // A over B, both under the commit threshold
+  ba[0] = 0.40f; ba[1] = 0.48f;  // B over A
   int letters = 0;
   for (int i = 0; i < 90; ++i) {
     if (fs_decoder_step(&d, (i % 2) ? ba : ab, t) == FS_EV_LETTER) letters++;
@@ -522,11 +531,11 @@ static void test_avg_flicker_commits_nothing(void) {
   CHECK_STR(&d, "");
 }
 
-static void test_avg_steady_letter_commits_in_three_frames(void) {
+static void test_avg_steady_letter_commits_in_two_frames(void) {
   fs_decoder_t d;
   init(&d);
   uint32_t t = 0;
-  events_t ev = feed(&d, 'C', 0.80f, 2, &t);
+  events_t ev = feed(&d, 'C', 0.80f, 1, &t);
   CHECK(ev.letters == 0 && d.live == 'C' && d.live_conf == 0.80f);  // first frame copies raw
   ev = feed(&d, 'C', 0.80f, 1, &t);
   CHECK(ev.last == FS_EV_LETTER);
@@ -560,15 +569,15 @@ static void test_avg_hysteresis_holds_the_candidate(void) {
   init(&d);
   uint32_t t = 0;
   feed(&d, 'C', 0.90f, 3, &t);
-  feed(&d, 'C', 0.50f, 20, &t);  // settles at 0.5: above hold, below commit
-  CHECK(d.live == 'C' && d.live_conf < 0.60f && d.live_conf >= 0.45f);
-  feed(&d, 'C', 0.40f, 20, &t);  // settles below hold
+  feed(&d, 'C', 0.45f, 20, &t);  // settles at 0.45: above hold, below commit
+  CHECK(d.live == 'C' && d.live_conf < 0.50f && d.live_conf >= 0.40f);
+  feed(&d, 'C', 0.35f, 20, &t);  // settles below hold
   CHECK(d.live == 0);
   // A letter that only touches the threshold once does not commit on held frames alone.
   init(&d);
   t = 0;
-  feed(&d, 'K', 0.62f, 1, &t);
-  events_t ev = feed(&d, 'K', 0.50f, 30, &t);
+  feed(&d, 'K', 0.52f, 1, &t);
+  events_t ev = feed(&d, 'K', 0.40f, 30, &t);
   CHECK(ev.letters == 0 && d.live == 'K');
   CHECK_STR(&d, "");
 }
@@ -588,7 +597,7 @@ static void test_avg_dip_does_not_rearm_but_hand_loss_does(void) {
   CHECK_STR(&d, "B");
   lost(&d, 350, &t);  // the hand bounces out for release_ms
   ev = feed(&d, 'B', 0.90f, 3, &t);
-  CHECK(ev.last == FS_EV_LETTER);
+  CHECK(ev.letters == 1);
   CHECK_STR(&d, "BB");
   lost(&d, 200, &t);  // too short a bounce
   ev = feed(&d, 'B', 0.90f, 30, &t);
@@ -601,11 +610,13 @@ static void test_avg_space_after_hand_lost_not_during_dip(void) {
   init(&d);
   uint32_t t = 0;
   sign(&d, 'H', &t);
-  events_t ev = feed(&d, 'H', 0.50f, 40, &t);  // 1.3 s dip, held by hysteresis
+  events_t ev = feed(&d, 'H', 0.45f, 40, &t);  // 1.3 s dip, held by hysteresis
   CHECK(ev.spaces == 0);
-  ev = lost(&d, 990, &t);
+  ev = gap(&d, 3000, &t);  // 3 s with the hand in view and no letter: still no space
   CHECK(ev.spaces == 0);
-  ev = lost(&d, 100, &t);
+  ev = lost(&d, 500, &t);  // out of view, under space_ms (long enough to repeat a letter)
+  CHECK(ev.spaces == 0);
+  ev = lost(&d, 200, &t);
   CHECK(ev.spaces == 1);
   CHECK_STR(&d, "H ");
   CHECK(!d.avg_valid);
@@ -671,8 +682,8 @@ static void test_avg_motion_letters(void) {
 }
 
 int main(void) {
-  // Averaging off: the per-frame rules as before.
-  g_alpha = 1.0f;
+  // The pre-averaging parameters: the per-frame rules as before.
+  g_legacy = true;
   test_defaults();
   test_commit_rule_and_hold();
   test_below_threshold_never_commits();
@@ -694,11 +705,11 @@ int main(void) {
   test_motion_pending_times_out_as_the_still_letter();
   test_motion_brief_dropout_does_not_end_the_hold();
   test_motion_other_letters_commit_as_before();
-  // Averaging on (the defaults).
-  g_alpha = 0.4f;
+  // The defaults: averaging on.
+  g_legacy = false;
   test_avg_held_letter_with_dips_commits_once();
   test_avg_flicker_commits_nothing();
-  test_avg_steady_letter_commits_in_three_frames();
+  test_avg_steady_letter_commits_in_two_frames();
   test_avg_live_conf_is_the_average();
   test_avg_letter_change_within_seven_frames();
   test_avg_hysteresis_holds_the_candidate();

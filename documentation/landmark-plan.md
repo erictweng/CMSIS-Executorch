@@ -202,3 +202,23 @@ loop >= 12 fps; otherwise ship `detect/blazepalm` + the data route for the demo.
   12 Python tests green. Pending the signer: capture R U K H N M S T O Q D I + A B L Y,
   retrain, score the 24 letters (task 5). Open: the board restarted once mid-run
   (counters zeroed) with no reset pressed.
+- 2026-10-18 (night): **orientation from gravity, built and on the board, not yet calibrated.**
+  Decision 10: the hand's angle is measured from the true vertical, not the camera's. The
+  ICM-42670-P on the DevKit's I3C bus is read every frame (`src/fs_imu.c`; init OK on the
+  first flash, 0 bad reads, fps unchanged at 18.9 without a hand); `src/fs_orient.c` averages
+  gravity (EMA 0.1), derives the camera's roll from a two-pose calibration
+  (`tests/imu_calibrate.py` -> `src/fs_orient_cal.h`) and levels the landmarks about the wrist
+  before the features; the MLP stays 63 wide and the datasets stay valid (photos are gravity-
+  upright). `g_fs_lm_dump` / `capture_keypoints.py` publish the levelled landmarks plus the
+  roll. Host: `tests/test_orient.py` (5 tests). Pending: the calibration (needs the board held
+  in two poses), then the tilt check (hold U, roll the board 45 deg, the levelled hand angle
+  stays put). Explicit sin/cos orientation inputs (65 wide) remain a later, separate step.
+- 2026-10-18 (demo prep): **space on hand removal, demo thresholds; built, not flashed.** The
+  space timer no longer runs on "no confident letter" (a pause or a low-confidence stretch
+  inside a word broke it): a space comes only when the hand has been out of view for
+  `space_ms` (now 600 ms), and the hand in view never makes one. The signer's bounce for a
+  double letter is 300-600 ms out of view, longer is a space. Defaults lowered as section 5
+  of the spec planned once averaging was in: `commit_threshold` 0.50, `hold_threshold` 0.40,
+  `commit_frames` 2. The legacy decoder tests pin the old parameters explicitly; 311 checks
+  green. To measure: HELLO and HI MOM with a deliberate drop between words, and whether
+  transitions leave stray letters at 0.50 / 2 frames (if so, `commit_frames` 3 first).

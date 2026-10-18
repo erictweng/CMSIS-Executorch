@@ -7,7 +7,8 @@ Sign the letter at the board (hand box >= 75 px on the panel: closer is better) 
 up for --seconds. With --letters each letter gets a countdown (--countdown seconds, time to
 change the shape), then its recording; the terminal says which letter is next. The script polls `g_fs_lm_dump` (src/app_main.cpp) with the core halted
 for each read, so every sample is one consistent frame: the 21 frame-pixel landmarks the
-MLP's features are built from, the presence and handedness scores. Frames are kept when the
+MLP's features are built from (levelled by the camera's roll: gravity straight down, see
+src/fs_orient.h), the presence and handedness scores and the roll applied (saved as `roll`). Frames are kept when the
 board's hand-frame counter advanced (no duplicates) and presence >= --min-presence.
 
 The output has the layout of ml/keypoint_dataset.py (landmarks normalised by the 320 px
@@ -33,10 +34,14 @@ import fs_tools as fs  # noqa: E402
 
 LABELS = "ABCDEFGHIKLMNOPQRSTUVWXY"
 FRAME = 320
-WORDS = 3 + 63  # counter, presence x1000, handedness x1000, 21 x (x, y, z) float bits
+WORDS = 4 + 63  # counter, presence x1000, handedness x1000, roll millidegrees, 21 x (x, y, z) float bits
 
 
-def read_dump(base: int) -> tuple[int, float, float, np.ndarray]:
+def signed(w: int) -> int:
+    return w - (1 << 32) if w >= (1 << 31) else w
+
+
+def read_dump(base: int) -> tuple[int, float, float, float, np.ndarray]:
     out = fs.jlink(["h", f"mem32 0x{base:08X} {WORDS}", "g"])
     words: list[int] = []
     for line in out.splitlines():  # "2008A7A0 = 00000000 00000000 00000000 000044F4"
@@ -45,8 +50,8 @@ def read_dump(base: int) -> tuple[int, float, float, np.ndarray]:
             words += [int(w, 16) for w in m.group(2).split()]
     if len(words) < WORDS:
         raise RuntimeError("J-Link read failed:\n" + out[-600:])
-    xyz = np.array([struct.unpack("<f", struct.pack("<I", w))[0] for w in words[3:WORDS]], np.float32).reshape(21, 3)
-    return words[0], words[1] / 1000.0, words[2] / 1000.0, xyz
+    xyz = np.array([struct.unpack("<f", struct.pack("<I", w))[0] for w in words[4:WORDS]], np.float32).reshape(21, 3)
+    return words[0], words[1] / 1000.0, words[2] / 1000.0, signed(words[3]) / 1000.0, xyz
 
 
 def main() -> int:
@@ -85,13 +90,13 @@ def record(base: int, letter: str, args, position: str) -> int:
         print(f"[{position}] sign {letter} ... {i}", flush=True)
         time.sleep(1)
     print(f"[{position}] recording {letter} for {args.seconds:.0f} s", flush=True)
-    lm, hd, pres = [], [], []
+    lm, hd, pres, rolls = [], [], [], []
     polls, dupes, low, errors = 0, 0, 0, 0
     t_end = time.time() + args.seconds
     while time.time() < t_end:
         polls += 1
         try:
-            frame, presence, right, xyz = read_dump(base)
+            frame, presence, right, roll_deg, xyz = read_dump(base)
         except RuntimeError as e:
             errors += 1
             if errors > 5:
@@ -108,6 +113,7 @@ def record(base: int, letter: str, args, position: str) -> int:
         lm.append(xyz / FRAME)
         hd.append(right)
         pres.append(presence)
+        rolls.append(roll_deg)
         if len(lm) % 10 == 0:
             print(f"  {len(lm)} frames (presence {presence:.2f}, hand {'R' if right >= 0.5 else 'L'} {right:.2f})", flush=True)
     print(f"{len(lm)} frames kept of {polls} polls: {dupes} repeats, {low} below presence {args.min_presence}")
@@ -116,11 +122,11 @@ def record(base: int, letter: str, args, position: str) -> int:
         return 0
     new = dict(landmarks=np.array(lm, np.float32), handedness=np.array(hd, np.float32),
                size=np.full((len(lm), 2), FRAME, np.int32), label=np.full(len(lm), LABELS.index(letter), np.int16),
-               source=np.array([args.source] * len(lm)))
+               source=np.array([args.source] * len(lm)), roll=np.array(rolls, np.float32))
     out = Path(args.out)
     if out.exists():
         old = np.load(out, allow_pickle=False)
-        new = {k: np.concatenate([old[k], new[k]]) for k in new}
+        new = {k: np.concatenate([old[k], new[k]]) if k in old.files else new[k] for k in new}
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out, **new)
     counts = np.bincount(new["label"].astype(int), minlength=len(LABELS))

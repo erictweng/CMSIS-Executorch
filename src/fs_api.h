@@ -33,14 +33,18 @@ bool fs_classify(const uint8_t rgb[FS_SIZE * FS_SIZE * 3], float probs[FS_CLASSE
 // reads the averaged stream. A letter needs commit_threshold to start a streak and on each
 // frame the streak counts; once it is the candidate it stays the live letter down to
 // hold_threshold, so a confidence dip is not a gap. The same letter commits again only after
-// the hand was lost for release_ms or another letter committed in between.
+// the hand was lost for release_ms or another letter committed in between. A space comes
+// from the hand leaving the frame for space_ms; a pause with the hand in view never makes
+// one, so slow or hesitant signing does not break words.
 typedef struct {
-  float commit_threshold;   // default 0.60
-  float hold_threshold;     // default 0.45: the live candidate stays while >= this (0: = commit_threshold)
+  float commit_threshold;   // default 0.50
+  float hold_threshold;     // default 0.40: the live candidate stays while >= this (0: = commit_threshold)
   float prob_alpha;         // default 0.4: weight of the new frame in the probability average (0 / 1: off)
-  int commit_frames;        // default 3 consecutive frames at or above commit_threshold
-  uint32_t space_ms;        // default 1000: no confident letter this long -> space
+  int commit_frames;        // default 2 consecutive frames at or above commit_threshold
+  uint32_t space_ms;        // default 600: no hand this long -> space
   uint32_t release_ms;      // default 300: no hand this long before the same letter commits again
+                            // (a bounce of the hand out of view between release_ms and space_ms
+                            // repeats a letter; longer makes a space)
   // Motion letters (fs_decoder_step_motion): D and I are held as "pending"; the fingertip's
   // displacement from where the hold began decides D vs Z and I vs J. Z / J commit the
   // moment the displacement reaches motion_threshold; D / I commit when the signer moves on.
@@ -76,7 +80,6 @@ typedef struct {
   char cand, last_committed;
   int streak;
   bool released;
-  uint32_t last_conf_ms;
   uint32_t last_hand_ms;
   uint32_t pending_since_ms;
   int pending_drop;

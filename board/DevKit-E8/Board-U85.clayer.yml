@@ -65,6 +65,11 @@ layer:
     # RGB565: square, no Bayer demosaicing on the CPU).
     - component: BSP:External peripherals:CAMERA Sensor MT9M114
     - component: BSP:External peripherals:ILI9806E LCD panel
+    # Accelerometer: ICM-42670-P on I3C, polled once per frame for the camera's roll relative
+    # to gravity (src/fs_imu.c, src/fs_orient.c). Not the BMI323 as well: the two pack drivers
+    # define the same global callbacks and do not link together.
+    - component: Device:SOC Peripherals:I3C
+    - component: BSP:External peripherals:ICM42670P Accelerometer
 
     - component: CMSIS:CORE
 

@@ -39,6 +39,15 @@ project:
         - file: ./src/fs_camera.c
           for-context: +DevKit-E8
         - file: ./src/fs_camera.h
+        # The ICM-42670-P accelerometer (I3C) is only in the DevKit-E8 board layer; the
+        # orientation math (roll from gravity, levelling the landmarks) is pure C99 for every
+        # target, host tests in tests/host/test_fs_orient.c.
+        - file: ./src/fs_imu.c
+          for-context: +DevKit-E8
+        - file: ./src/fs_imu.h
+        - file: ./src/fs_orient.c
+        - file: ./src/fs_orient.h
+        - file: ./src/fs_orient_cal.h
         # Palm detector CPU side (resize, anchors, decode, box rule, tracking, crop). Pure
         # C99, every target; host tests in tests/host/test_fs_detect.c.
         - file: ./src/fs_detect.c

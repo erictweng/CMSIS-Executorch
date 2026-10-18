@@ -1,5 +1,6 @@
 """Read the live loop's telemetry over J-Link (no UART needed): letter, probability, presence,
-fps, stage times, box, pending motion letter and its path, committed text length, handedness.
+fps, stage times, box, pending motion letter and its path, committed text length, handedness,
+the averaged gravity vector (g) and the camera's roll relative to gravity (degrees).
 
     .venv/bin/python tests/board_telemetry.py [--count 5] [--interval 1.0]
     .venv/bin/python tests/board_telemetry.py --count 60 --interval 0.5 --handedness
@@ -21,7 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fs_tools as fs  # noqa: E402
 
 
-N = 17
+N = 21
+
+
+def signed(w: int) -> int:
+    return w - (1 << 32) if w >= (1 << 31) else w
 
 
 def read_tele() -> list[int]:
@@ -52,7 +57,8 @@ def main() -> int:
         pending = chr(t[9]) if t[9] else "-"
         print(f"{letter} {t[1] / 1000:.2f} p{t[2] / 1000:.2f} | box {t[6]},{t[7]} {t[8]}px | det {t[4] / 1000:.1f}ms "
               f"lm {t[5] / 1000:.1f}ms | {t[3] / 1000:.1f} fps | pending {pending} path {t[10] / 1000:.2f} | text len {t[11]} "
-              f"| hand {t[12] / 1000:.2f} {'R' if t[12] >= 500 else 'L'} flips {t[14]}")
+              f"| hand {t[12] / 1000:.2f} {'R' if t[12] >= 500 else 'L'} flips {t[14]} "
+              f"| g ({signed(t[17]) / 1000:+.2f} {signed(t[18]) / 1000:+.2f} {signed(t[19]) / 1000:+.2f}) roll {signed(t[20]) / 1000:+.1f} deg")
         if i + 1 < args.count:
             time.sleep(args.interval)
     if args.handedness and first and last:
