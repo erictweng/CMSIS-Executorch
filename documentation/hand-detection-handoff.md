@@ -17,6 +17,8 @@ the detector stage; see section 4 "Board timing" for the breakdown and what was 
 - Work on branch **`detect/blazepalm`**. It was branched from `display/lcd-live` (the LCD work
   and the three board fixes, both verified on the board) and has the brief merged in.
   Commits on it, newest first:
+  - `e260b0d1` Palm detector on the board: detect then classify, int8 boundary, box on the
+    LCD (everything in sections 4-6 of this file; the commit message has the summary).
   - `6cccd3c4` Port of the multi-method AI-layer generator from `hackathon-pico-faces`
     (`create_ai_layer.py`: `get_methods()` / `get_params()` / `AI_LAYER_STRICT`), plus
     `ml/blazepalm.py` (anchors, decode, box rule, reference crops) and `ml/classifier_eval.py`.
@@ -25,17 +27,11 @@ the detector stage; see section 4 "Board timing" for the breakdown and what was 
     UART line; timings moved from the DWT to the 100 MHz REFCLK counter.
   - `482af306` DevKit-E8 board fixes: bulk SRAM above the A32 stub (`APP_SRAM_POOL_OFFSET`),
     `SRAM0_SRAM1_COMBINED 0`, caches cleaned in `main()`, no `SERVICES_set_run_cfg`.
-- **Uncommitted in the working tree** (keep them; commit once section 5 is settled):
-  - `model/model.py`: two methods, `detect` (BlazePalm, `a16w8`) and `classify` (the current
-    MobileNetV2-0.5 letter model, `a8w8`), `get_params()` -> `ai_layer/model_params.h`.
-  - `model/blazepalm_192.pt2` (5.2 MB): the exported float BlazePalm graph.
-  - `ml/blazepalm_export.py`: TFLite -> ONNX -> onnx2torch -> exportable graph -> `.pt2`.
-  - `board/DevKit-E8/RTE/Device/AE822FA0E5597LS0_M55_HP/app_mem_regions.h`: HP MRAM region
-    extended to `0x370000` (user region shrunk to 32 kB at `0x80570000`), the pico-faces diff.
-  - `ai_layer/` regenerated for the two methods (`ai_layer.clayer.yml`, `model_pte.c`,
-    `model_params.h`; the rows live in the ignored `model_pte_data.inc`).
-- The firmware (`src/app_main.cpp`) still calls method `forward` and has no detector code; it
-  will not work at run time with the two-method program until section 6 is done.
+- Untracked and **not ours**: `model/pico_faces/` (60 MB of pico-faces checkpoints,
+  `dit_qat.pt`, `vae_final.pt`, that came along with the generator port). Delete or move it;
+  do not commit it.
+- `ai_layer/model_pte_data.inc` (the program's bytes) is git-ignored: run `create_ai_layer.py`
+  after a fresh checkout before building (~3 min).
 - Do not touch `display/lcd-live` or `fingerspell`; PRs go against `fingerspell`.
 
 ## 2. Read these
