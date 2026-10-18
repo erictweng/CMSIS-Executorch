@@ -29,12 +29,12 @@ OTHER_TARGETS = ["SSE-320-U85", "AppKit-E8"]
 SRAM0 = (0x02000000, 0x02400000)
 A32_STUB_END = 0x02010000           # APP_SRAM_POOL_OFFSET: the ATOC loads the boot stub below
 FRAME_BUFFER_BYTES = 480 * 800 * 2  # RGB565
-# With a hand: "X 0.93 U 0.04 M 0.01 | box 112,84 96x96 s0.87 | det 3.1ms cam 2.0ms pre 0.8ms npu 4.2ms
-# ui 1.6ms | 21.3 fps"; without: "no hand | det 3.1ms ui 1.2ms | 21.9 fps". Groups: ui, fps.
-LIVE = re.compile(r"^(?:[A-Y] \d\.\d\d [A-Y] \d\.\d\d [A-Y] \d\.\d\d \| box -?\d+,-?\d+ \d+x\d+ s\d\.\d\d "
-                  r"\| det [\d.]+ms cam [\d.]+ms pre [\d.]+ms npu [\d.]+ms|no hand \| det [\d.]+ms) "
+# With a hand: "A 0.93 S 0.04 T 0.01 | box 112,84 96x96 s0.87 p0.98 | det 22.9ms cam 2.0ms lm 18.0ms
+# ui 1.6ms | 12.5 fps"; without: "no hand | det 3.1ms ui 1.2ms | 21.9 fps". Groups: ui, fps.
+LIVE = re.compile(r"^(?:[A-Y] \d\.\d\d [A-Y] \d\.\d\d [A-Y] \d\.\d\d \| box -?\d+,-?\d+ \d+x\d+ s\d\.\d\d p\d\.\d\d "
+                  r"\| det [\d.]+ms cam [\d.]+ms lm [\d.]+ms|no hand \| det [\d.]+ms) "
                   r"ui ([\d.]+)ms \| ([\d.]+) fps$", re.M)
-MIN_FPS = 15.0
+MIN_FPS = 10.0  # two NPU models per frame; the landmark plan accepts ~12 fps
 MAX_UI_MS = 10.0  # fs_api.h: fs_ui_render must return in < 10 ms
 # Frame-buffer rows (480 px, 2 bytes each) of the layout in src/fs_display.cpp.
 ROW_BYTES = 480 * 2
@@ -114,7 +114,7 @@ class Source(unittest.TestCase):
 
     def test_live_loop_prints_the_render_time(self):
         app = (SRC / "app_main.cpp").read_text()
-        self.assertIn("npu %.1fms ui %.1fms | %.1f fps", app)
+        self.assertIn("lm %.1fms ui %.1fms | %.1f fps", app)
         self.assertIn("fs_display_set_top3(top3, r.prob);", app)
 
 

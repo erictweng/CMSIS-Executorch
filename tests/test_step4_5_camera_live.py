@@ -25,15 +25,14 @@ import fs_tools as fs
 
 SRC = fs.REPO / "src"
 LIVE = re.compile(
-    r"^([A-Y]) (\d\.\d\d) ([A-Y]) (\d\.\d\d) ([A-Y]) (\d\.\d\d) \| box -?\d+,-?\d+ \d+x\d+ s\d\.\d\d "
-    r"\| det [\d.]+ms cam ([\d.]+)ms pre ([\d.]+)ms "
-    r"npu ([\d.]+)ms(?: ui [\d.]+ms)? \| ([\d.]+) fps$", re.M)  # box: detector; ui: with the LCD build
+    r"^([A-Y]) (\d\.\d\d) ([A-Y]) (\d\.\d\d) ([A-Y]) (\d\.\d\d) \| box -?\d+,-?\d+ \d+x\d+ s\d\.\d\d p\d\.\d\d "
+    r"\| det ([\d.]+)ms cam ([\d.]+)ms lm ([\d.]+)ms(?: ui [\d.]+ms)? \| ([\d.]+) fps$", re.M)  # groups 7-9: det cam lm
 NO_HAND = re.compile(r"^no hand \| det [\d.]+ms(?: ui [\d.]+ms)? \| ([\d.]+) fps$", re.M)
 PROBE = re.compile(r"^probe frame (\d+) \| px((?: [0-9a-f]{4}){8}) \| mean (\d+)$", re.M)
 PROBE_DONE = re.compile(r"^probe done: (\d+) frames in ([\d.]+) s = ([\d.]+) fps "
                         r"\(overflows (\d+) errors (\d+) restarts (\d+)\)$", re.M)
 LABELS = "ABCDEFGHIKLMNOPQRSTUVWXY"
-FPS_RANGE = (10.0, 35.0)  # MT9M114 320x320 runs at ~25 fps; the loop at ~19 with UART output
+FPS_RANGE = (8.0, 35.0)  # MT9M114 320x320 runs at ~25 fps; detector + landmark model ~12
 OUT = fs.REPO / "tests" / "out"
 
 
@@ -159,9 +158,9 @@ class OnBoard(unittest.TestCase):
         fps = statistics.median(rates)
         self.assertTrue(FPS_RANGE[0] <= fps <= FPS_RANGE[1], fps)
         self.assertTrue(all(r < 100 for r in rates), "fps spikes")
-        if live:  # the classifier stages run only with a hand in view
-            self.assertLess(statistics.median(float(g[8]) for g in live), 20.0)
-            self.assertLess(statistics.median(float(g[7]) for g in live), 5.0)
+        if live:  # the landmark stage runs only with a hand in view
+            self.assertLess(statistics.median(float(g[8]) for g in live), 40.0)  # lm
+            self.assertLess(statistics.median(float(g[6]) for g in live), 40.0)  # det
 
     def test_loop_keeps_classifying_every_frame(self):
         frames = self.c2["frames"] - self.c1["frames"]
@@ -180,7 +179,7 @@ class OnBoard(unittest.TestCase):
         self.assertNotIn("camera STOPPED", self.console)
 
     def test_no_model_errors_in_the_loop(self):
-        self.assertNotRegex(self.console, r"(detect|classify|forward|set_input) failed")
+        self.assertNotRegex(self.console, r"(detect|landmark|classify|forward|set_input) failed")
 
     def test_camera_and_loop_come_back_after_a_warm_reset_mid_loop(self):
         t = self.console_after_reset

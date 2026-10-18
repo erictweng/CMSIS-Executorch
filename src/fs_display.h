@@ -18,4 +18,7 @@ void fs_display_set_top3(const char letters[3], const float probs[3]);
 // red frame and no box, fresh false (a held box) draws it muted instead of green.
 void fs_display_set_detection(const uint16_t* frame565, bool hand, bool fresh, float x0, float y0, float x1,
                               float y1);
+// The 21 hand landmarks for the next fs_ui_render(): crop_xy in the 224 px landmark crop (drawn
+// on the crop view), xyz in frame pixels (drawn on the inset); NULL = none.
+void fs_display_set_landmarks(const float crop_xy[21][2], const float xyz[21][3]);
 #endif

@@ -3,8 +3,8 @@
 //
 // The UI half of fs_api.h: fs_ui_init() brings the panel up, fs_ui_render() draws one frame.
 // Layout, top to bottom: title, the 128x128 hand crop the classifier sees scaled 3x (384x384)
-// in a 1 px frame with an 80x80 inset of the whole camera frame and the detected hand box in
-// its top-right corner, the live letter in big type with its confidence as a percentage and a
+// in a 1 px frame with the hand skeleton (21 landmarks) over it and an 80x80 inset of the whole
+// camera frame with the detected hand box in its top-right corner, the live letter in big type with its confidence as a percentage and a
 // bar (green from the decoder's commit threshold up, grey below), the 2nd/3rd guesses, the
 // stage timings and fps, and the text the decoder has committed.
 //
@@ -54,6 +54,14 @@ float top3_probs[3];
 const uint16_t* detection_frame;
 bool detection_hand, detection_fresh;
 float detection_box[4];
+bool landmarks_valid;
+float landmarks_crop[21][2];
+float landmarks_frame[21][3];
+constexpr int kLandmarkCrop = 224;  // fs_landmark.h FS_LM_SIZE
+// Finger chains for the skeleton: wrist -> MCP -> PIP -> DIP -> tip, plus the palm arc.
+constexpr uint8_t kBones[][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 4}, {0, 5}, {5, 6}, {6, 7}, {7, 8}, {5, 9}, {9, 10},
+                                 {10, 11}, {11, 12}, {9, 13}, {13, 14}, {14, 15}, {15, 16}, {13, 17}, {0, 17},
+                                 {17, 18}, {18, 19}, {19, 20}};
 
 constexpr uint16_t rgb565(unsigned r, unsigned g, unsigned b) {
   return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
@@ -253,6 +261,34 @@ void blit_inset() {
   rect(kInsetX + b[2], kInsetY + b[1], 1, b[3] - b[1] + 1, color);
 }
 
+// A 1 px line between two frame-buffer points (clipped by rect()).
+void line(int x0, int y0, int x1, int y1, uint16_t color) {
+  const int dx = x1 > x0 ? x1 - x0 : x0 - x1, dy = y1 > y0 ? y1 - y0 : y0 - y1;
+  const int n = dx > dy ? dx : dy;
+  for (int i = 0; i <= n; ++i) {
+    const int x = x0 + (n ? (x1 - x0) * i / n : 0), y = y0 + (n ? (y1 - y0) * i / n : 0);
+    rect(x, y, 1, 1, color);
+  }
+}
+
+// The hand skeleton on the crop view (crop-space landmarks) and dots on the inset (frame
+// pixels), drawn after the crop and the inset, inside their rows.
+void draw_landmarks() {
+  if (!landmarks_valid) return;
+  int px[21], py[21];
+  for (int i = 0; i < 21; ++i) {
+    px[i] = kCropX + static_cast<int>(landmarks_crop[i][0] * kCropSize / kLandmarkCrop);
+    py[i] = kCropY + static_cast<int>(landmarks_crop[i][1] * kCropSize / kLandmarkCrop);
+  }
+  for (const auto& b : kBones) line(px[b[0]], py[b[0]], px[b[1]], py[b[1]], kGreen);
+  for (int i = 0; i < 21; ++i) rect(px[i] - 2, py[i] - 2, 5, 5, i == 0 ? kRed : kWhite);
+  for (int i = 0; i < 21; ++i) {
+    int x = static_cast<int>(landmarks_frame[i][0] / kInsetStep), y = static_cast<int>(landmarks_frame[i][1] / kInsetStep);
+    if (x < 0 || y < 0 || x >= kInsetSize || y >= kInsetSize) continue;
+    rect(kInsetX + x, kInsetY + y, 1, 1, kWhite);
+  }
+}
+
 void draw_confidence(char letter, float conf, bool committed_colour) {
   const char s[2] = {letter ? letter : '-', '\0'};
   letter_field.set(s, letter ? (committed_colour ? kGreen : kWhite) : kMuted);
@@ -359,6 +395,16 @@ void fs_display_set_detection(const uint16_t* frame565, bool hand, bool fresh, f
   detection_box[3] = y1;
 }
 
+void fs_display_set_landmarks(const float crop_xy[21][2], const float xyz[21][3]) {
+  landmarks_valid = crop_xy != nullptr && xyz != nullptr;
+  if (!landmarks_valid) return;
+  for (int i = 0; i < 21; ++i) {
+    landmarks_crop[i][0] = crop_xy[i][0];
+    landmarks_crop[i][1] = crop_xy[i][1];
+    for (int c = 0; c < 3; ++c) landmarks_frame[i][c] = xyz[i][c];
+  }
+}
+
 void fs_display_set_top3(const char letters[3], const float probs[3]) {
   for (int i = 0; i < 3; ++i) {
     top3_letters[i] = letters[i];
@@ -387,6 +433,7 @@ void fs_ui_render(const fs_decoder_t* d, const fs_metrics_t* m, fs_event_t last_
   }
   if (preview) blit_crop(preview);
   blit_inset();
+  draw_landmarks();
 
   // The model's top letter and its probability, green once the decoder holds it above
   // its commit threshold (d->live), white below.
@@ -403,7 +450,7 @@ void fs_ui_render(const fs_decoder_t* d, const fs_metrics_t* m, fs_event_t last_
     std::snprintf(line, sizeof(line), "SHOW A LETTER");
   guess_field.set(line, kMuted);
 
-  std::snprintf(line, sizeof(line), "CAM %d NPU %d UI %d MS  %d FPS",
+  std::snprintf(line, sizeof(line), "CAM %d LM %d UI %d MS  %d FPS",
                 static_cast<int>(m->camera_ms + 0.5f), static_cast<int>(m->npu_ms + 0.5f),
                 static_cast<int>(last_ui_ms + 0.5f), static_cast<int>(m->fps + 0.5f));
   metrics_field.set(line, kMuted);

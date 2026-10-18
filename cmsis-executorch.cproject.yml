@@ -44,6 +44,11 @@ project:
         - file: ./src/fs_detect.c
           optimize: speed  # the per-frame resize and crop: 20 ms at the Debug build's -O1
         - file: ./src/fs_detect.h
+        # Hand landmark CPU side: rotated crop, decode, keypoint MLP. Pure C99, every target;
+        # host tests in tests/host/test_fs_landmark.c.
+        - file: ./src/fs_landmark.c
+          optimize: speed
+        - file: ./src/fs_landmark.h
         # Decoder (fs_api.h): per-frame letter probabilities to text. Pure C99, no
         # hardware, for every target; host tests in tests/host/test_fs_decoder.c.
         - file: ./src/fs_decoder.c

@@ -134,4 +134,17 @@ loop >= 12 fps; otherwise ship `detect/blazepalm` + the data route for the demo.
 
 ## 6. Status
 
-- 2026-10-17: branch created, plan written, phase 0 started.
+- 2026-10-17 20:50: phase 0 **go**. `hand_landmark_lite` exported (`ml/handlandmark_export.py`,
+  one extra fix-up: dynamic squeeze) and matches TFLite to 2e-4 px. Strict export: `landmark`
+  is one Ethos-U delegate with no CPU operators, 146 M MACs, int8 weights 1061 KiB, Vela
+  scratch **1185 KiB** (temp pool raised to 1.5 MB on the DevKit), program 2,265,152 bytes
+  with the detector. Output quantization: landmarks 1.18 px per step, presence/handedness
+  1/255.
+- 2026-10-17 21:30: phases 1-3 built. `ml/handlandmark.py` reference, `src/fs_landmark.c/.h`,
+  host tests (`tests/test_landmark.py`), keypoint MLP (hidden 128, 95.8 % val on 7,763
+  Marxulia landmarks from MediaPipe; confusions E/O, Q/G, U/R, P/Q), `app_main.cpp` pipeline,
+  skeleton on the LCD. int8 landmarks within 0.8 px median of float (p90 4.2 px), presence
+  agreement 96 %. DevKit image builds: MRAM 2.57 of 3.44 MB, SRAM0 3.82 of 3.94 MB. Not yet
+  run on the board (USB dropped). Open: the lite model on a tight unrotated crop gives
+  different landmarks than MediaPipe's pipeline; `ml/keypoint_dataset_board.py` extracts
+  training landmarks through the board's own pipeline so the MLP sees what the board sees.

@@ -1,6 +1,6 @@
 """BlazePalm: onnx2torch module -> self-contained model/blazepalm_192.pt2 (torch.export).
 
-onnx2torch's Reshape, Resize and PReLU converters branch on tensor values, which
+onnx2torch's Reshape, Squeeze, Resize and PReLU converters branch on tensor values, which
 torch.export cannot guard; they are replaced by fixed-shape equivalents recorded on one
 trace run (batch 1). The result is checked against the TFLite reference outputs.
 
@@ -33,7 +33,7 @@ def exportable(net: torch.fx.GraphModule, example: torch.Tensor) -> tuple[torch.
     shapes = {}
     hooks = []
     for node in net.graph.nodes:
-        if node.op == "call_module" and type(net.get_submodule(node.target)).__name__.lower().startswith("onnxreshape"):
+        if node.op == "call_module" and type(net.get_submodule(node.target)).__name__.lower().startswith(("onnxreshape", "onnxsqueeze")):
             hooks.append(net.get_submodule(node.target).register_forward_hook(
                 lambda mod, inp, out, name=node.target: shapes.__setitem__(name, tuple(out.shape))))
     with torch.no_grad():
@@ -47,7 +47,7 @@ def exportable(net: torch.fx.GraphModule, example: torch.Tensor) -> tuple[torch.
         if node.op != "call_module": continue
         sub = net.get_submodule(node.target)
         cls = type(sub).__name__.lower()
-        if cls.startswith("onnxreshape"): repl = FixedReshape(shapes[node.target])
+        if cls.startswith(("onnxreshape", "onnxsqueeze")): repl = FixedReshape(shapes[node.target])  # squeeze with tensor axes too
         elif cls.startswith("onnxresize"): repl = Up2Bilinear()
         elif cls.startswith("onnxprelu"): repl = PReLUNative()
         elif cls.startswith("onnxpaddynamic"):
