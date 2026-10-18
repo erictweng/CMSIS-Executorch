@@ -194,6 +194,13 @@ the layout and `tests/test_display.py`'s frame-buffer probes are unchanged), the
 the `fs_camera_get_crop` symbol in `tests/test_step3_camera_init.py` (the compiler inlines
 `fs_camera_crop` now that only the A/B path calls it).
 
+Also fixed on the board with Eric at the camera (2026-10-17 evening): the hand-box shift
+follows the wrist -> middle-finger keypoints (a fixed "up" put the crop on the forearm with
+this camera's mounting), and the sensor's auto-exposure is now enabled in `fs_camera_init()`
+(frames were almost black; see `fingerspell-bringup.md`, "Camera exposure"). With both, a
+real F in front of a busy room reads F on every frame but only at 0.3-0.4: the classifier
+itself (dataset crops, plain backgrounds) is now the limit, which is item 3 below.
+
 Remaining:
 1. **Hand in view.** The board tests only saw "no hand" plus a few boxes on the scene the
    camera happens to look at; nobody has signed at the detector yet. Run `FS_HW=1

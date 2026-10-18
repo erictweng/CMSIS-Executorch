@@ -115,6 +115,16 @@ own printed `0.0ms`. Tests: `tests/test_display.py` (`FS_HW=1` flashes and check
 panel message, the `ui` time < 10 ms at >= 15 fps, the frame buffer changing with
 the camera, and a warm reset).
 
+## Camera exposure
+
+The pack's MT9M114 register table leaves the sensor's auto-exposure tracking off
+(`cam_aet_aemode` is set, `AE_TRACK_ALGO` 0xA804 is not): frames of a lit room had a mean
+brightness of 1-5 of 255, so only a backlit screen held in front of the lens produced a
+usable picture and a real hand was a black blob (this is also why the earlier "all-zero
+frames" looked like a covered lens). `fs_camera_init()` now calls
+`cpi->Control(CPI_CAMERA_SENSOR_AE, 1)` after the sensor configure; the probe's mean
+settles at 50-65 within a few frames and real hands classify.
+
 ## Detector (BlazePalm on the Ethos-U85)
 
 The hand no longer has to sit in the centre box: a palm detector finds it anywhere in the

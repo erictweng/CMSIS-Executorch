@@ -165,6 +165,10 @@ bool fs_camera_init(void) {
   (void)cpi->Stop();
   status = cpi->Control(CPI_CAMERA_SENSOR_CONFIGURE, 0U);
   if (status != ARM_DRIVER_OK) return fail(FS_CAM_ERR_SENSOR, "MT9M114 configure over I2C1", status);
+  // The pack's register table leaves the sensor's auto-exposure tracking off: frames of a
+  // lit room came out with a mean brightness of 1-5 (only a backlit screen was visible).
+  status = cpi->Control(CPI_CAMERA_SENSOR_AE, 1U);
+  if (status != ARM_DRIVER_OK) return fail(FS_CAM_ERR_SENSOR, "MT9M114 auto-exposure enable", status);
   status = cpi->Control(CPI_CONFIGURE, 0U);
   if (status != ARM_DRIVER_OK) return fail(FS_CAM_ERR_INIT, "CPI configure", status);
   status = cpi->Control(CPI_EVENTS_CONFIGURE, ARM_CPI_EVENT_CAMERA_CAPTURE_STOPPED |
