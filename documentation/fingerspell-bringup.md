@@ -147,7 +147,8 @@ Debug build's `-O1` they took ~25 ms per frame for the 150k values, more than th
 **Board side** (`src/fs_detect.c`, pure C99, host-tested): exact 5:3 box-filter resize of the
 RGB565 frame to 192x192 float, anchors computed from the index (24x24x2 stride-8, then
 12x12x6 stride-16), argmax + sigmoid decode of the raw head, hand box = palm box shifted
-0.5 x height toward the fingers, 2.6x, square, no rotation; EMA 0.5 on the box, held for up to
+0.5 x its size from the wrist toward the middle-finger keypoint (so the rule holds whichever
+way the camera is mounted), 2.6x, square, no rotation; EMA 0.5 on the box, held for up to
 4 missed frames, `no hand` on the fifth; the box is cropped from the full frame with a box
 filter to 128x128 (black off-frame) for the classifier. `src/app_main.cpp` runs `detect` then
 `classify` per frame; `-DFS_FIXED_CENTRE_CROP` keeps the old centre crop for A/B tests. The

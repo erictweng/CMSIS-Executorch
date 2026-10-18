@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < (size_t)FS_DET_ANCHORS; ++i) qlog[i] = quantize(head[(size_t)FS_DET_ANCHORS * FS_DET_COORDS + i], lq);
     fs_detection_t d;
     const bool hit = fs_detect_decode(qreg, rq, qlog, lq, &d);
-    const fs_box_t hb = fs_detect_hand_box(&d.palm, (float)FS_DET_FRAME / FS_DET_SIZE);
+    const fs_box_t hb = fs_detect_hand_box(&d, (float)FS_DET_FRAME / FS_DET_SIZE);
     printf("%d %.6f %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f", hit, (double)d.score, d.anchor, (double)d.palm.x0,
            (double)d.palm.y0, (double)d.palm.x1, (double)d.palm.y1, (double)hb.x0, (double)hb.y0, (double)hb.x1,
            (double)hb.y1);

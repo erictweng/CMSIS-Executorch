@@ -53,7 +53,9 @@ Input: one 320x320 RGB565 frame from the CPI ring (`fs_camera_latest_frame()`, a
 7. Hand box from palm box. The palm box covers the palm only; MediaPipe's rule is: rotate by
    the wrist->middle-finger keypoint angle, shift the centre 0.5 x box height toward the
    fingers, scale by 2.6x. Skip the rotation (the classifier was trained on upright hands and
-   rotating costs CPU): do shift + scale, make the box square, clip to the frame.
+   rotating costs CPU) but keep the direction: shift along the wrist -> middle-finger keypoint
+   vector, not a fixed "up" (the DevKit camera is not mounted upright; a fixed shift put the
+   crop on the forearm). Then scale, make the box square, clip to the frame.
 8. Temporal smoothing: exponential moving average on box centre and size (alpha ~0.5), and
    hold the last box for ~5 frames when the detector misses one.
 9. No hand (no score > 0.5 for N frames, N ~ 5): skip classification, emit "no hand" to the

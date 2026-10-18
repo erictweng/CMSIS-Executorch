@@ -163,7 +163,8 @@ class DetectorHost(unittest.TestCase):
                 self.assertAlmostEqual(out[1], float(s[best]), places=3)
                 self.assertEqual(int(out[2]), best)
                 np.testing.assert_allclose(out[3:7], boxes[best], atol=1e-2)
-                np.testing.assert_allclose(out[7:11], bp.hand_box(boxes[best] * FRAME / INPUT, FRAME), atol=2e-2)
+                np.testing.assert_allclose(out[7:11], bp.hand_box(boxes[best] * FRAME / INPUT, FRAME, kp[best] * FRAME / INPUT),
+                                           atol=2e-2)
                 np.testing.assert_allclose(np.array(out[11:]).reshape(7, 2), kp[best], atol=1e-2)
                 fboxes, _, fs_ = bp.decode(reg, sc)
                 self.assertEqual(int(np.argmax(fs_)), best, "int8 picks another anchor than float")
@@ -177,11 +178,22 @@ class DetectorHost(unittest.TestCase):
     def test_hand_box_rule(self):
         for palm in ([80, 90, 112, 122], [10, 10, 20, 40], [150, 100, 190, 180]):
             with self.subTest(palm=palm):
-                x0, y0, x1, y1 = bp.hand_box(np.array(palm, float), INPUT)
+                size = max(palm[2] - palm[0], palm[3] - palm[1])
+                x0, y0, x1, y1 = bp.hand_box(np.array(palm, float), INPUT)  # no keypoints: fingers up
                 self.assertAlmostEqual(x1 - x0, y1 - y0)                                   # square
-                self.assertAlmostEqual(x1 - x0, max(palm[2] - palm[0], palm[3] - palm[1]) * 2.6)
+                self.assertAlmostEqual(x1 - x0, size * 2.6)
                 self.assertAlmostEqual((x0 + x1) / 2, (palm[0] + palm[2]) / 2)             # centred in x
-                self.assertAlmostEqual((y0 + y1) / 2, (palm[1] + palm[3]) / 2 - 0.5 * (palm[3] - palm[1]))
+                self.assertAlmostEqual((y0 + y1) / 2, (palm[1] + palm[3]) / 2 - 0.5 * size)
+        # The shift follows the wrist -> middle-finger direction: a hand pointing down (wrist at
+        # the top of the image, as a camera mounted upside down sees it) shifts the box down.
+        kp = np.zeros((7, 2))
+        kp[bp.KP_WRIST], kp[bp.KP_MIDDLE_MCP] = (96, 80), (96, 110)
+        x0, y0, x1, y1 = bp.hand_box(np.array([80, 90, 112, 122], float), INPUT, kp)
+        self.assertAlmostEqual((y0 + y1) / 2, 106 + 0.5 * 32)
+        kp[bp.KP_WRIST], kp[bp.KP_MIDDLE_MCP] = (70, 100), (120, 100)  # pointing right
+        x0, y0, x1, y1 = bp.hand_box(np.array([80, 90, 112, 122], float), INPUT, kp)
+        self.assertAlmostEqual((x0 + x1) / 2, 96 + 0.5 * 32)
+        self.assertAlmostEqual((y0 + y1) / 2, 106)
 
     def frame_file(self, seed: int) -> tuple[Path, np.ndarray]:
         rng = np.random.default_rng(seed)

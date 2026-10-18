@@ -342,7 +342,7 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     fs_detection_t det;
     bool hit = false;
     if (!detect(module, &det, &hit)) continue;
-    const fs_box_t box = fs_detect_hand_box(&det.palm, kInputToFrame);
+    const fs_box_t box = fs_detect_hand_box(&det, kInputToFrame);
     fs_track_update(&track, hit, &box, det.score);
     const uint32_t t1 = cycles();
     const float det_ms = cycles_ms(t1 - t_frame);

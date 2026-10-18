@@ -9,9 +9,9 @@ detections_to_rects, rect_transformation):
               anchor offset 0.5, aspect ratio 1.0, fixed_anchor_size -> 2016 anchors
     decode    scores: sigmoid (clipped at +-100), boxes: centre + offset / 192 * anchor,
               18 values per anchor: cx cy w h, then 7 keypoints (x y)
-    hand box  shift the palm box 0.5 x its height toward the fingers, scale 2.6x,
-              make it square (MediaPipe also rotates by the wrist->middle-finger angle;
-              the board skips the rotation)
+    hand box  shift the palm box 0.5 x its size toward the fingers (along the wrist ->
+              middle-finger keypoints), scale 2.6x, make it square (MediaPipe also
+              rotates by that angle; the board skips the rotation)
 
 The 192 model's two output tensors: regressors [1, 2016, 18] and scores [1, 2016, 1].
 """
@@ -28,7 +28,7 @@ STRIDES = (8, 16, 16, 16)
 MIN_SCALE, MAX_SCALE = 0.1484375, 0.75
 SCORE_THRESHOLD = 0.5
 KP_WRIST, KP_MIDDLE_MCP = 0, 2
-BOX_SHIFT_Y = -0.5   # toward the fingers (up, in palm-rect coordinates)
+BOX_SHIFT = 0.5      # x palm size, from the wrist toward the middle finger
 BOX_SCALE = 2.6
 
 
@@ -95,14 +95,22 @@ def best_detection(regressors, scores, threshold: float = SCORE_THRESHOLD):
     return boxes[i], kp[i], float(s[i])
 
 
-def hand_box(palm_box: np.ndarray, frame: int, shift_y: float = BOX_SHIFT_Y, scale: float = BOX_SCALE):
+def hand_box(palm_box: np.ndarray, frame: int, keypoints: np.ndarray | None = None,
+             shift: float = BOX_SHIFT, scale: float = BOX_SCALE):
     """Square hand box (x0, y0, x1, y1) in frame pixels from a palm box in the same pixels:
-    shift by shift_y x height (negative = up, toward the fingers), scale by `scale`, square
-    on the longer side; may run off the frame (the crop pads with black)."""
+    the centre moves by shift x the palm size from the wrist toward the middle finger
+    (keypoints (7, 2) in the same pixels; straight up when not given), the side is scale x
+    the palm size; may run off the frame (the crop pads with black). MediaPipe also rotates
+    the box by that angle; the board (src/fs_detect.c) and this reference only shift."""
     x0, y0, x1, y1 = (float(v) for v in palm_box)
-    w, h = x1 - x0, y1 - y0
-    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2 + shift_y * h
-    side = max(w, h) * scale
+    size = max(x1 - x0, y1 - y0)
+    d = np.array([0.0, -1.0])
+    if keypoints is not None:
+        v = np.asarray(keypoints, float)[KP_MIDDLE_MCP] - np.asarray(keypoints, float)[KP_WRIST]
+        if np.linalg.norm(v) > 1e-3:
+            d = v / np.linalg.norm(v)
+    cx, cy = (x0 + x1) / 2 + shift * size * d[0], (y0 + y1) / 2 + shift * size * d[1]
+    side = size * scale
     return cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2
 
 

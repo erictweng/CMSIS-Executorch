@@ -20,7 +20,7 @@ extern "C" {
 #define FS_DET_COORDS 18       // cx cy w h, then 7 keypoints (x y), in input pixels
 #define FS_DET_KEYPOINTS 7
 #define FS_DET_THRESHOLD 0.5f  // sigmoid(score logit) >= 0.5, i.e. logit >= 0
-#define FS_DET_BOX_SHIFT_Y (-0.5f)  // palm box -> hand box: shift by -0.5 x height (toward the fingers)
+#define FS_DET_BOX_SHIFT 0.5f       // palm box -> hand box: shift by 0.5 x size toward the fingers
 #define FS_DET_BOX_SCALE 2.6f       // and grow 2.6x, square (no rotation on the board)
 #define FS_DET_MAX_SIDE 640.0f      // hand boxes larger than this are clamped (2x the frame)
 #define FS_DET_EMA 0.5f             // box smoothing: new = EMA x detection + (1 - EMA) x previous
@@ -70,8 +70,11 @@ void fs_detect_preprocess(const uint16_t* frame, int8_t* out, fs_quant_t input);
 bool fs_detect_decode(const int8_t* regressors, fs_quant_t rq, const int8_t* logits, fs_quant_t lq,
                       fs_detection_t* det);
 
-// Palm box (192 px) -> square hand box in frame pixels (shift, scale, square, clamp side).
-fs_box_t fs_detect_hand_box(const fs_box_t* palm, float input_to_frame);
+// Palm box (192 px) -> square hand box in frame pixels: shifted 0.5 x its size from the
+// palm centre along the wrist -> middle-finger keypoint direction (MediaPipe rotates the
+// box by that angle; here only the shift follows it, so the rule works whichever way the
+// camera is mounted), scaled 2.6x, square, side clamped.
+fs_box_t fs_detect_hand_box(const fs_detection_t* det, float input_to_frame);
 
 // Temporal smoothing and hold: feed every frame; `hit` with its box when the detector fired.
 void fs_track_reset(fs_track_t* t);

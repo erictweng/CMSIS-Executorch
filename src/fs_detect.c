@@ -5,6 +5,9 @@
 #include <math.h>
 #include <string.h>
 
+#define KP_WRIST 0
+#define KP_MIDDLE_MCP 2
+
 // ---- anchors ----------------------------------------------------------------------
 // MediaPipe's ssd_anchors_calculator for the 192 lite model: layer strides 8, 16, 16, 16
 // with aspect ratio 1 and one interpolated scale per layer. Stride 8 is one layer of
@@ -119,11 +122,25 @@ bool fs_detect_decode(const int8_t* regressors, fs_quant_t rq, const int8_t* log
 }
 
 // ---- palm box -> hand box ------------------------------------------------------------
-fs_box_t fs_detect_hand_box(const fs_box_t* palm, float input_to_frame) {
+fs_box_t fs_detect_hand_box(const fs_detection_t* det, float input_to_frame) {
+  const fs_box_t* palm = &det->palm;
   const float w = (palm->x1 - palm->x0) * input_to_frame, h = (palm->y1 - palm->y0) * input_to_frame;
-  const float cx = (palm->x0 + palm->x1) / 2 * input_to_frame;
-  const float cy = (palm->y0 + palm->y1) / 2 * input_to_frame + FS_DET_BOX_SHIFT_Y * h;
-  float side = (w > h ? w : h) * FS_DET_BOX_SCALE;
+  const float size = w > h ? w : h;
+  // Direction from the wrist (keypoint 0) to the middle-finger MCP (keypoint 2); straight
+  // up (fingers at the top of the image) when the keypoints coincide.
+  float dx = det->keypoints[KP_MIDDLE_MCP][0] - det->keypoints[KP_WRIST][0];
+  float dy = det->keypoints[KP_MIDDLE_MCP][1] - det->keypoints[KP_WRIST][1];
+  const float len = sqrtf(dx * dx + dy * dy);
+  if (len > 1e-3f) {
+    dx /= len;
+    dy /= len;
+  } else {
+    dx = 0.0f;
+    dy = -1.0f;
+  }
+  const float cx = (palm->x0 + palm->x1) / 2 * input_to_frame + FS_DET_BOX_SHIFT * size * dx;
+  const float cy = (palm->y0 + palm->y1) / 2 * input_to_frame + FS_DET_BOX_SHIFT * size * dy;
+  float side = size * FS_DET_BOX_SCALE;
   if (side > FS_DET_MAX_SIDE) side = FS_DET_MAX_SIDE;
   if (side < 1.0f) side = 1.0f;
   fs_box_t b = {cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2};
