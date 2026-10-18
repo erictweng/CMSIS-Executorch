@@ -206,11 +206,13 @@ class Build(unittest.TestCase):
         self.assertLessEqual(size, limit, f"image {size:#x} overflows LR_ROM {limit:#x}")
 
     def test_model_and_ai_layer_are_unchanged(self):
-        # (src/ is unchanged in step 2 itself; later steps add the camera code there.)
+        # (src/ is unchanged in step 2 itself; later steps add the camera code there.) The
+        # letter classifier and its calibration data: the detector branch adds a second method
+        # to model/model.py and the program, so the generated files are not compared.
         if git("rev-parse", "--verify", BASE_REF).returncode:
             self.skipTest(f"base ref {BASE_REF} not available")
-        r = git("diff", "--stat", BASE_REF, "--", "model", "ai_layer/ai_layer.clayer.yml",
-                "ai_layer/model_pte.c", "ai_layer/model_pte.h")
+        r = git("diff", "--stat", BASE_REF, "--", "model/fingerspell_letters.pt2", "model/calib_128.npy",
+                "ai_layer/model_pte.h")
         self.assertEqual(r.stdout.strip(), "", r.stdout)
 
 
