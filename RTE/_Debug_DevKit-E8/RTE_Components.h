@@ -28,6 +28,8 @@
 #define RTE_ETHOS_U_CORE_DRIVER
 /* AlifSemiconductor::BSP:External peripherals:CAMERA Sensor MT9M114@2.2.0 */
 #define RTE_Drivers_CAMERA_SENSOR_MT9M114            /* Driver CAMERA Sensor */
+/* AlifSemiconductor::BSP:External peripherals:ICM42670P Accelerometer@2.2.0 */
+#define RTE_Drivers_ICM42670P           /* Driver ICM42670P */
 /* AlifSemiconductor::BSP:External peripherals:ILI9806E LCD panel@2.2.0 */
 #define RTE_Drivers_MIPI_DSI_ILI9806E_PANEL    /* Driver ILI9806E LCD panel*/
 /* AlifSemiconductor::CMSIS Driver:I2C@2.2.0 */
@@ -45,6 +47,8 @@
 #define RTE_Drivers_DMA                   /* Driver DMA*/
 /* AlifSemiconductor::Device:SOC Peripherals:GPIO@2.2.0 */
 #define RTE_Drivers_IO              /* Driver GPIO */
+/* AlifSemiconductor::Device:SOC Peripherals:I3C@2.2.0 */
+#define RTE_Drivers_I3C                    /* Driver I3C */
 /* AlifSemiconductor::Device:SOC Peripherals:MIPI CSI2@2.2.0 */
 #define RTE_Drivers_MIPI_CSI2              /* Driver MIPI CSI2 */
 /* AlifSemiconductor::Device:SOC Peripherals:MIPI DSI CSI2 DPHY@2.2.0 */

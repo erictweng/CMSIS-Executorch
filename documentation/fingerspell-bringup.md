@@ -209,6 +209,20 @@ Knobs and tools from the signing sessions (`src/fs_landmark.h`, `src/fs_api.h`):
 - Motion letters: `motion_threshold` 1.0 hand sizes of fingertip displacement from where the
   D / I hold began (not a path sum); Z / J commit when reached; the panel's guess line shows
   `D HELD: MOVE FOR Z  PATH n%` while pending.
+- Orientation from the true vertical (`src/fs_imu.c`, `src/fs_orient.c`): the DevKit-E8's
+  ICM-42670-P accelerometer (I3C, Alif pack driver, polled once per frame) gives gravity; with
+  the camera's image axes calibrated against the sensor (`tests/imu_calibrate.py`, two poses ->
+  `src/fs_orient_cal.h`, then rebuild + flash) the camera's roll is known and the landmarks are
+  rotated about the wrist so gravity points straight down before the MLP's features. The
+  display and the decoder keep the camera's view. Uncalibrated or no sensor: roll 0, nothing
+  changes. Boot prints `imu init OK: g = (..)`; a stuck bring-up stops after `imu: power` (the
+  pack driver's dynamic-address wait has no timeout; `g_fs_imu_stage` over J-Link says where).
+  Telemetry words 17-20 carry g and the roll; `imu_calibrate.py --check` prints the live roll.
+  Calibrated 2026-10-18 (residual 0.04): image-down is the sensor's -Y, image-right its +X, so
+  the demo pose stands the board on its edge with the camera looking level. Lying flat the
+  camera looks along gravity, the image has no "down" and the roll is held at 0
+  (`FS_ORIENT_MIN_INPLANE` 0.3 g); the first flash after that change booted straight into the
+  semihosting exit (main returned) and a J-Link reset fixed it, as happens on this board.
 - `tests/board_telemetry.py --handedness` (flips, uncertain frames), `tests/capture_keypoints.py
   --letter R --seconds 10` (the board's landmarks for a letter -> `model/keypoints_board_live.npz`),
   then `ml/keypoint_train.py model/keypoints_marxulia.npz model/keypoints_marxulia_board.npz
@@ -224,11 +238,11 @@ averaged over frames and every rule reads the average. The parameters, all in
 | Parameter | Default | Tune when |
 |---|---|---|
 | `prob_alpha` | 0.4 | letter changes feel laggy: raise toward 0.5; spam remains: lower toward 0.3. 1.0 turns averaging off |
-| `commit_threshold` | 0.60 | letters sit at 0.5-0.6 on a real hand: lower to 0.50 (safe once averaging is on) |
-| `hold_threshold` | 0.45 | the live letter drops out mid-hold: lower (keep under `commit_threshold`; 0 = no hysteresis) |
-| `commit_frames` | 3 | first letter too slow: 2 is safe on the averaged stream |
-| `release_ms` | 300 | double letters ("LL") need a shorter or longer bounce of the hand out of view |
-| `space_ms` | 1000 | spaces come too early or late after the hand drops |
+| `commit_threshold` | 0.50 | spurious letters during transitions: raise toward 0.60; letters still not registering: capture them (section 5 of the spec), do not go lower |
+| `hold_threshold` | 0.40 | the live letter drops out mid-hold: lower (keep under `commit_threshold`; 0 = no hysteresis) |
+| `commit_frames` | 2 | transitions leave stray letters: 3 |
+| `release_ms` | 300 | double letters ("LL"): the hand must leave the frame for at least this, and less than `space_ms` |
+| `space_ms` | 600 | the hand out of view this long makes a space; a pause with the hand in view never does. Shorter makes double letters harder, longer makes spaces feel slow |
 
 Two more averages run before the decoder: the crop geometry the landmark model sees
 (`FS_LM_CROP_SMOOTH` 0.5, `src/fs_landmark.h`) and the MLP features (`FS_LM_SMOOTH` 0.5).
@@ -237,8 +251,24 @@ about 7 frames (450 ms), a change to a new letter in 5-7 frames.
 
 Rules worth knowing when reading `decoder:` lines or `tests/board_telemetry.py`: the same
 letter repeats only after the hand left the frame for `release_ms` (a confidence dip never
-re-arms it); the displayed confidence is the averaged one; `g_fs_tele[1]` is still the raw
-MLP top-1 probability. Host tests: `python3 -m unittest tests.test_decoder_host` (no venv).
+re-arms it); a space comes only from the hand leaving the frame for `space_ms`, never from a
+pause (time is not a signal any more: hesitating mid-word costs nothing); the displayed
+confidence is the averaged one; `g_fs_tele[1]` is still the raw MLP top-1 probability. For
+the signer: drop the hand out of view briefly (0.3-0.6 s) to repeat a letter, longer for a
+space. Host tests: `python3 -m unittest tests.test_decoder_host` (no venv).
+
+Joystick (the DevKit's 5-way stick, the board's only input): DOWN clears the text, LEFT
+deletes one character per press, no auto-repeat. Either edit re-arms the decoder, so the
+letter still being held prints again after `commit_frames` without bouncing the hand, a
+pending D / I is dropped, and no space is inserted until the hand has been in view again
+(so a deleted trailing space does not come straight back). Press -> event logic:
+`src/fs_input.c` (host: `python3 -m unittest tests.test_input_host`). GPIO read:
+`src/fs_joystick.c`, LPGPIO P15_2 (DOWN) and P15_0 (LEFT) through `Driver_GPIO15`, per pin,
+no pinmux touched (boot sets pull-ups and debounce in `gpios.h`; the LCD reset on P15_5 is
+untouched). Boot prints `joystick init OK (down 0 left 0)`; hold a direction while resetting
+to confirm the mapping from those raw values. Each press prints `decoder: backspace` or
+`decoder: clear` with the text. Polled once per frame, so a tap shorter than a frame
+(about 60 ms) can be missed.
 
 ## Next
 

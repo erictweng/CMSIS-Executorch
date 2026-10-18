@@ -46,6 +46,17 @@
 #include "sys_utils.h"   // sys_busy_loop_init_ns
 #define FS_HAVE_CAMERA 1
 #endif
+#ifdef RTE_Drivers_ICM42670P  // the DevKit-E8's accelerometer: the camera's roll relative to gravity
+#include "fs_imu.h"
+#define FS_HAVE_IMU 1
+#endif
+#if defined(FINGERSPELL_LCD) && defined(RTE_Drivers_IO)  // the DevKit-E8 joystick edits the text
+#include "fs_input.h"
+#include "fs_joystick.h"
+#define FS_HAVE_JOYSTICK 1
+#endif
+#include "fs_orient.h"
+#include "fs_orient_cal.h"
 
 using arm::embedded::EmbeddedModule;
 using executorch::aten::DimOrderType;
@@ -64,16 +75,19 @@ volatile uint32_t g_fs_dump_request = 0;
 volatile uint32_t g_fs_loop_frames = 0;  // live-loop iterations (frames through the detector)
 // Per-frame telemetry for the debugger (tests/fs_tools.py read_word): the UART is not always
 // available. Letters as ASCII codes, probabilities and times x1000, path in 1/1000 hand sizes.
-volatile uint32_t g_fs_tele[17] = {0};  // 0 letter 1 prob 2 presence 3 fps 4 det_ms 5 lm_ms 6 box_x 7 box_y 8 box_w
+volatile uint32_t g_fs_tele[21] = {0};  // 0 letter 1 prob 2 presence 3 fps 4 det_ms 5 lm_ms 6 box_x 7 box_y 8 box_w
                                        // 9 pending letter 10 path 11 committed text length
                                        // 12 handedness x1000 (this frame; >= 500 = right, no mirror)
                                        // counters since boot: 13 hand frames 14 left/right flips between
                                        // consecutive hand frames 15 frames with handedness in [0.3, 0.7]
                                        // 16 left (mirrored) frames
+                                       // 17 18 19 averaged gravity x y z in milli-g (int32 bits)
+                                       // 20 camera roll relative to gravity, millidegrees (int32 bits)
 // The landmarks the MLP's features are built from, for tests/capture_keypoints.py (J-Link):
 // 0 hand-frame counter (advances only on frames with a hand), 1 presence x1000,
-// 2 handedness x1000, 3.. the 21 x (x, y, z) frame-pixel landmarks as float bits.
-volatile uint32_t g_fs_lm_dump[3 + FS_LM_FEATURES] = {0};
+// 2 handedness x1000, 3 the roll applied (millidegrees, int32 bits), 4.. the 21 x (x, y, z)
+// levelled frame-pixel landmarks as float bits.
+volatile uint32_t g_fs_lm_dump[4 + FS_LM_FEATURES] = {0};
 }
 
 namespace {
@@ -248,17 +262,27 @@ void letters_reset() {
   g_crop_avg_valid = false;
 }
 
-// Publish this frame's landmarks for the laptop (tests/capture_keypoints.py reads them over
-// J-Link with the core halted, so the block is consistent).
+// The camera's roll relative to gravity (fs_orient.h): the accelerometer is read once per frame
+// in the live loop, averaged, and turned into the angle the landmarks are rotated by before
+// the MLP's features, so the hand's orientation is measured from the true vertical. 0 without
+// a sensor or a calibration (src/fs_orient_cal.h).
+const fs_orient_cal_t kOrientCal = {FS_ORIENT_CAL_DOWN, FS_ORIENT_CAL_RIGHT};
+fs_orient_t g_orient = {{0.f, 0.f, 0.f}, false};
+float g_roll = 0.f;  // radians
+uint32_t int_bits(float v) { return static_cast<uint32_t>(static_cast<int32_t>(v)); }
+
+// Publish this frame's (levelled) landmarks for the laptop (tests/capture_keypoints.py reads
+// them over J-Link with the core halted, so the block is consistent).
 void publish_landmarks(const fs_landmarks_t& lm) {
   for (int i = 0; i < FS_LM_COUNT; ++i)
     for (int c = 0; c < 3; ++c) {
       uint32_t bits;
       memcpy(&bits, &lm.xyz[i][c], sizeof bits);
-      g_fs_lm_dump[3 + 3 * i + c] = bits;
+      g_fs_lm_dump[4 + 3 * i + c] = bits;
     }
   g_fs_lm_dump[1] = static_cast<uint32_t>(lm.presence * 1000.f);
   g_fs_lm_dump[2] = static_cast<uint32_t>(lm.right * 1000.f);
+  g_fs_lm_dump[3] = int_bits(g_roll * 180000.f / 3.14159265f);
   g_fs_lm_dump[0]++;
 }
 void letters(const fs_landmarks_t& lm, TopK* r) {
@@ -318,8 +342,12 @@ bool infer(EmbeddedModule& module, const uint16_t* frame, bool hold, fs_detectio
     return true;
   }
   *hand = true;
-  letters(*lm, r);
-  publish_landmarks(*lm);
+  // The MLP sees the landmarks levelled by the camera's roll (gravity straight down); the
+  // display and the decoder keep the camera's view (`*lm`: the decoder uses magnitudes only).
+  fs_landmarks_t level = *lm;
+  fs_orient_level(level.xyz, FS_LM_COUNT, g_roll, lm->xyz[FS_LM_WRIST]);
+  letters(level, r);
+  publish_landmarks(level);
   return true;
 }
 
@@ -460,6 +488,10 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
   fs_decoder_init(&decoder, nullptr);
   fs_display_set_frame(g_crop);
 #endif
+#ifdef FS_HAVE_JOYSTICK
+  fs_input_t joy;
+  fs_input_init(&joy);
+#endif
   for (;;) {
     const uint32_t t0 = cycles();
     uint32_t seq = 0;
@@ -470,6 +502,14 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
       continue;
     }
     const uint32_t t_frame = cycles();
+#ifdef FS_HAVE_IMU
+    {  // the camera's roll this frame, from the averaged gravity vector
+      float g[3];
+      if (fs_imu_read(g)) fs_orient_gravity(&g_orient, g, FS_ORIENT_ALPHA);
+      g_roll = g_orient.valid ? fs_orient_roll(&kOrientCal, g_orient.g) : 0.f;
+    }
+#endif
+    const uint32_t t_imu = cycles();
     fs_detection_t det;
     fs_landmarks_t lm;
     float crop_xy[FS_LM_COUNT][2];  // crop-space landmarks (unused by the display now)
@@ -487,8 +527,10 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     fs_track_update(&track, detected && (hand || !hold), &box, det.score);
     // Where the time goes, every 64 frames.
     if ((g_fs_loop_frames & 63) == 1)
-      printf("det split: resize+detector %.1fms crop %.1fms landmark+mlp %.1fms\n", cycles_ms(t_detected - t_frame),
-             cycles_ms(t_cropped - t_detected), cycles_ms(t_inferred - t_cropped));
+      printf("det split: imu %.2fms resize+detector %.1fms crop %.1fms landmark+mlp %.1fms | roll %.1f deg g (%.2f %.2f %.2f)\n",
+             cycles_ms(t_imu - t_frame), cycles_ms(t_detected - t_imu), cycles_ms(t_cropped - t_detected),
+             cycles_ms(t_inferred - t_cropped), static_cast<double>(g_roll * 57.29578f), static_cast<double>(g_orient.g[0]),
+             static_cast<double>(g_orient.g[1]), static_cast<double>(g_orient.g[2]));
 
     if (g_fs_loop_frames > 0) {  // the first frame has no previous one to time against
       const float dt = cycles_ms(t0 - last);
@@ -497,7 +539,7 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     last = t0;
     g_fs_loop_frames++;
     const float fps = period_ms > 0.f ? 1000.f / period_ms : 0.f;
-    const float det_ms = cycles_ms(t_detected - t_frame);
+    const float det_ms = cycles_ms(t_detected - t_imu);
     const float cam_ms = cycles_ms(t_frame - t0) + (hand || hold ? cycles_ms(t_cropped - t_detected) : 0.f);
     const float lm_ms = hand || hold ? cycles_ms(t_inferred - t_cropped) : 0.f;
     // The panel shows the camera's view of the hand box (upright, as the signer sees it), not
@@ -506,13 +548,26 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     const uint32_t t5 = cycles();
 #ifdef FINGERSPELL_LCD
     // The free-running 32 kHz timer keeps milliseconds monotonic across REFCLK wraps. Without
-    // a hand the decoder sees all-zero probabilities: no letter, and a space after its idle time.
+    // a hand the decoder sees all-zero probabilities: no letter, and a space once the hand has
+    // been out of view for space_ms.
     const uint32_t now_ms = static_cast<uint32_t>(
         static_cast<uint64_t>(S32K_CNTRead->CNTCVL) * 1000u / 32768u);
     // Fingertips and hand size for the motion letters (Z from D, J from I), frame pixels.
     const fs_motion_t motion = {hand, {lm.xyz[8][0], lm.xyz[8][1]}, {lm.xyz[20][0], lm.xyz[20][1]},
                                 hand ? hypotf(lm.xyz[9][0] - lm.xyz[0][0], lm.xyz[9][1] - lm.xyz[0][1]) : 0.f};
-    const fs_event_t event = fs_decoder_step_motion(&decoder, r.probabilities, &motion, now_ms);
+    fs_event_t event = fs_decoder_step_motion(&decoder, r.probabilities, &motion, now_ms);
+#ifdef FS_HAVE_JOYSTICK
+    {  // DOWN clears the text, LEFT deletes one character; one event per press, clear wins
+      bool down = false, left = false;
+      if (fs_joystick_read(&down, &left)) {
+        const fs_input_event_t in = fs_input_update(&joy, down, left);
+        const fs_event_t edit = in == FS_INPUT_CLEAR       ? fs_decoder_clear(&decoder)
+                                : in == FS_INPUT_BACKSPACE ? fs_decoder_backspace(&decoder)
+                                                           : FS_EV_NONE;
+        if (edit != FS_EV_NONE) event = edit;
+      }
+    }
+#endif
     const uint32_t t6 = cycles();
     const fs_metrics_t metrics = {fps, cam_ms, det_ms, lm_ms, cycles_ms(t6 - t5), cycles_ms(t6 - t0)};
     const char top3[3] = {hand ? kLabels[r.top[0]] : '\0', hand ? kLabels[r.top[1]] : '\0', hand ? kLabels[r.top[2]] : '\0'};
@@ -541,6 +596,8 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
     g_fs_tele[9] = static_cast<uint32_t>(decoder.pending);
     g_fs_tele[10] = static_cast<uint32_t>(decoder.pending_path * 1000.f);
     g_fs_tele[11] = static_cast<uint32_t>(decoder.len);
+    for (int i = 0; i < 3; ++i) g_fs_tele[17 + i] = int_bits(g_orient.g[i] * 1000.f);
+    g_fs_tele[20] = int_bits(g_roll * 180000.f / 3.14159265f);
     {  // handedness diagnostics: does the left-hand mirror flip between frames of one hand?
       static int last_side = -1;  // -1: no hand in the previous frame
       if (hand) {
@@ -559,6 +616,8 @@ void dump_crop(const uint8_t* rgb, uint32_t seq) {
       printf("decoder: %s%c path %.2f text \"%s\"\n", decoder.pending ? "pending " : "committed ",
              decoder.pending ? decoder.pending : decoder.text[decoder.len ? decoder.len - 1 : 0], decoder.pending_path,
              decoder.text);
+    if (event == FS_EV_BACKSPACE || event == FS_EV_CLEAR)
+      printf("decoder: %s text \"%s\"\n", event == FS_EV_CLEAR ? "clear" : "backspace", decoder.text);
 #else
     if (hand)
       printf("%c %.2f %c %.2f %c %.2f | box %d,%d %dx%d s%.2f p%.2f | det %.1fms cam %.1fms lm %.1fms | %.1f fps\n",
@@ -627,6 +686,16 @@ extern "C" int app_main(void) {
   // with the CPI's DMA. Prints "camera init OK 320x320 RGB565" or the stage that failed.
   cycles_init();
   const bool camera = fs_camera_init();
+#ifdef FS_HAVE_IMU
+  // After the camera, so a stuck IMU bring-up (the pack driver can spin without a timeout) is
+  // visible as the last stage printed and does not cost the camera. Prints "imu init OK g = ..".
+  fs_orient_reset(&g_orient);
+  fs_imu_init();
+  printf("orient: %s (src/fs_orient_cal.h)\n", FS_ORIENT_CALIBRATED ? "calibrated" : "not calibrated: roll stays 0");
+#endif
+#ifdef FS_HAVE_JOYSTICK
+  fs_joystick_init();  // last: a refusal is the last line printed and costs nothing else
+#endif
   if (camera) {
     printf("core clock %lu Hz\n", static_cast<unsigned long>(SystemCoreClock));
     camera_probe(3000);                         // step 4: frames

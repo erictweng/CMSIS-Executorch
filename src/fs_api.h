@@ -33,14 +33,20 @@ bool fs_classify(const uint8_t rgb[FS_SIZE * FS_SIZE * 3], float probs[FS_CLASSE
 // reads the averaged stream. A letter needs commit_threshold to start a streak and on each
 // frame the streak counts; once it is the candidate it stays the live letter down to
 // hold_threshold, so a confidence dip is not a gap. The same letter commits again only after
-// the hand was lost for release_ms or another letter committed in between.
+// the hand was lost for release_ms or another letter committed in between. A space comes
+// from the hand leaving the frame for space_ms; a pause with the hand in view never makes
+// one, so slow or hesitant signing does not break words. A backspace or clear re-arms the
+// decoder: the letter still being held commits again, a pending D / I is dropped, and no
+// space is inserted until the hand has been in view again.
 typedef struct {
-  float commit_threshold;   // default 0.60
-  float hold_threshold;     // default 0.45: the live candidate stays while >= this (0: = commit_threshold)
+  float commit_threshold;   // default 0.50
+  float hold_threshold;     // default 0.40: the live candidate stays while >= this (0: = commit_threshold)
   float prob_alpha;         // default 0.4: weight of the new frame in the probability average (0 / 1: off)
-  int commit_frames;        // default 3 consecutive frames at or above commit_threshold
-  uint32_t space_ms;        // default 1000: no confident letter this long -> space
+  int commit_frames;        // default 2 consecutive frames at or above commit_threshold
+  uint32_t space_ms;        // default 600: no hand this long -> space
   uint32_t release_ms;      // default 300: no hand this long before the same letter commits again
+                            // (a bounce of the hand out of view between release_ms and space_ms
+                            // repeats a letter; longer makes a space)
   // Motion letters (fs_decoder_step_motion): D and I are held as "pending"; the fingertip's
   // displacement from where the hold began decides D vs Z and I vs J. Z / J commit the
   // moment the displacement reaches motion_threshold; D / I commit when the signer moves on.
@@ -76,7 +82,7 @@ typedef struct {
   char cand, last_committed;
   int streak;
   bool released;
-  uint32_t last_conf_ms;
+  bool space_blocked;       // a backspace / clear holds the space rule until the hand is next seen
   uint32_t last_hand_ms;
   uint32_t pending_since_ms;
   int pending_drop;
@@ -92,7 +98,9 @@ fs_event_t fs_decoder_step(fs_decoder_t* d, const float probs[FS_CLASSES], uint3
 // is lost. motion NULL behaves like fs_decoder_step().
 fs_event_t fs_decoder_step_motion(fs_decoder_t* d, const float probs[FS_CLASSES], const fs_motion_t* motion,
                                   uint32_t now_ms);
-// Button / console input.
+// Button / console input (the DevKit's joystick: LEFT = backspace, DOWN = clear). Both
+// re-arm the decoder: the letter being held commits again after commit_frames (no hand
+// bounce needed), a pending D / I is dropped, and no space comes until the hand is seen.
 fs_event_t fs_decoder_backspace(fs_decoder_t* d);
 fs_event_t fs_decoder_clear(fs_decoder_t* d);
 

@@ -43,6 +43,34 @@ PRESENCE_HOLD = 0.25
 HOLD_FRAMES = 5
 
 
+# Camera roll relative to gravity (src/fs_orient.c): the board's accelerometer gives the
+# gravity vector in its own axes; the calibration (tests/imu_calibrate.py) gives the image's
+# down (+y) and right (+x) directions in those axes. The roll is the gravity direction's angle
+# in the image, from down toward right; levelling rotates the landmarks about the wrist by it
+# so gravity points straight down and the MLP measures orientation from the true vertical.
+ORIENT_ALPHA = 0.1
+ORIENT_MIN_G = 0.5
+ORIENT_MIN_INPLANE = 0.3  # gravity's in-plane component below this: camera looks along gravity, roll 0
+
+
+def roll(cal_down, cal_right, g) -> float:
+    """The image's roll (radians) from a gravity reading; 0 when level, uncalibrated or |g| ~ 0."""
+    g = np.asarray(g, float)
+    if np.linalg.norm(g) < ORIENT_MIN_G:
+        return 0.0
+    x, y = float(np.dot(g, cal_right)), float(np.dot(g, cal_down))
+    return 0.0 if np.hypot(x, y) < ORIENT_MIN_INPLANE else float(np.arctan2(x, y))
+
+
+def level(xyz: np.ndarray, roll_rad: float, about) -> np.ndarray:
+    """Rotate the landmarks' x, y about `about` by roll_rad (fs_orient_level)."""
+    p = np.asarray(xyz, float).copy()
+    c, s = np.cos(roll_rad), np.sin(roll_rad)
+    x, y = p[:, 0] - about[0], p[:, 1] - about[1]
+    p[:, 0], p[:, 1] = about[0] + c * x - s * y, about[1] + s * x + c * y
+    return p
+
+
 def right_hand(score: float, mode: str = HANDEDNESS) -> bool:
     """Whether to treat the hand as right (no mirror) under the handedness rule."""
     return mode == "right" or (mode == "auto" and float(score) >= 0.5)

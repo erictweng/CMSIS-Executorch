@@ -7,7 +7,9 @@ when `motion->valid` is false or the probabilities sum to under 0.5, whichever a
 held (hysteresis) frame keeps the candidate but does not count toward `commit_frames`;
 `prob_alpha` or `hold_threshold` left at 0 in a custom cfg means off, so older configs keep
 their behaviour; `g_fs_tele[1]` still carries the raw MLP probability (the decoder's
-`live_conf` is the averaged one).
+`live_conf` is the averaged one). Later the same day: the space rule changed from a pause to
+the hand leaving the frame for `space_ms` (600 ms), and the section 5 defaults went in
+(`commit_threshold` 0.50, `hold_threshold` 0.40, `commit_frames` 2).
 Companion to `documentation/landmark-plan.md`; the jitter analysis it follows up is in the
 status log there.
 
