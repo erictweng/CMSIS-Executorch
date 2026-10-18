@@ -14,6 +14,9 @@ void fs_display_set_frame(const uint8_t* rgb);
 // The model's top-3 letters and probabilities for the next fs_ui_render() (fs_decoder_t only
 // carries the top letter, and only above the commit threshold).
 void fs_display_set_top3(const char letters[3], const float probs[3]);
+// Swap the main view and the inset: camera frame large with the classifier crop small (the
+// default), or the crop large with the camera frame small.
+void fs_display_swap_views(void);
 // The full 320x320 RGB565 camera frame (borrowed until the next fs_ui_render()) for the
 // small inset, and the hand box on it in frame pixels: hand false draws the inset with a
 // red frame and no box, fresh false (a held box) draws it muted instead of green.

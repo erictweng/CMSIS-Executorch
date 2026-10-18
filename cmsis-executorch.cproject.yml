@@ -66,6 +66,10 @@ project:
         # read is DevKit-E8 only.
         - file: ./src/fs_input.c
         - file: ./src/fs_input.h
+        # The panel's hold on newly committed letters (a newer commit replaces a held one):
+        # pure C99 for every target, host tests in tests/host/test_fs_commit_hold.c.
+        - file: ./src/fs_commit_hold.c
+        - file: ./src/fs_commit_hold.h
         - file: ./src/fs_joystick.c
           for-context: +DevKit-E8
         - file: ./src/fs_joystick.h
